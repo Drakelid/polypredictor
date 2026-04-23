@@ -1,0 +1,70 @@
+[project]
+name = "polypredictor"
+version = "0.0.1"
+description = "PolyPredictor workspace root."
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = [
+    "packages/polymarket-client",
+    "packages/model",
+    "services/api",
+    "services/ingest",
+]
+
+[tool.uv.sources]
+polymarket-client = { workspace = true }
+polypredictor-model = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # bugbear
+    "UP",  # pyupgrade
+    "SIM", # simplify
+    "RUF", # ruff-specific
+]
+ignore = [
+    "E501", # line length handled by formatter
+    "UP046", # PEP 695 generics — opt out for now; explicit Generic is still valid
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "SIM"]
+# FastAPI uses Depends() in argument defaults — that's the canonical pattern.
+"services/api/**" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers --import-mode=importlib"
+testpaths = [
+    "packages/polymarket-client/tests",
+    "packages/model/tests",
+    "services/ingest/tests",
+    "services/api/tests",
+]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "ruff>=0.15.11",
+]

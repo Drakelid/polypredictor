@@ -1,0 +1,16 @@
+{
+  "name": "polypredictor",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @polypredictor/web dev",
+    "build:web": "pnpm --filter @polypredictor/web build",
+    "lint": "pnpm --recursive lint",
+    "typecheck": "pnpm --recursive typecheck"
+  }
+}
