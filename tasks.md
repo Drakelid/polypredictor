@@ -37,7 +37,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Shared token-bucket rate limiter per base URL at **70% of published ceilings** (§7)
 - [x] Response cache layer with per-endpoint TTLs: `/markets` 60s, `/midpoint` 2s, `/book` 1s, `/holders` 300s, `/v1/leaderboard` 1h
 - [x] Retry with jittered backoff; surface rate-limit headers as metrics  <!-- retry-after parsed into PolymarketRateLimitError; health cb emits to ingest_health -->
-- [ ] ETag / If-Modified-Since on `/markets` and `/events`
+- [x] ETag / If-Modified-Since on `/markets` and `/events`  <!-- conditional revalidation wired in HttpTransport + GammaClient -->
 - [ ] Contract tests against a Polymarket sandbox or recorded fixtures  <!-- respx unit tests in place; full recorded-fixtures suite deferred -->
 
 ### 0.4 Polymarket WSS manager
@@ -51,8 +51,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 ### 0.5 Ingestion workers
 - [x] Gamma discovery job (60s cadence): upsert active crypto/finance markets, expand via related-tags graph  <!-- related-tags graph scaffolded on GammaClient; wiring into discovery loop is TODO once category expansion is required -->
 - [x] CLOB book/price poller: 5s for top-20 by volume, 60s for the rest (~200 markets)
-- [ ] `/prices-history` backfill job for newly discovered markets
-- [ ] `/trades` public-trades sweeper for markets not covered by WSS
+- [x] `/prices-history` backfill job for newly discovered markets  <!-- services/ingest/src/ingest/workers/prices_history_backfill.py -->
+- [x] `/trades` public-trades sweeper for markets not covered by WSS  <!-- services/ingest/src/ingest/workers/trades_sweeper.py -->
 - [x] Dead-letter queue + replay tool for failed ingest jobs  <!-- Redis DLQ implemented; dedicated replay CLI deferred -->
 - [x] Source-failure rate metric (§8 guardrail: < 1% per source per day)  <!-- ingest_health table + HealthSink callback -->
 
@@ -74,81 +74,81 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 ## M1 — Market-type taxonomy + principled baselines (Weeks 4–5)
 
 ### 1.1 Market-type classifier (§6.1)
-- [ ] Deterministic regex/keyword pass for obvious threshold/range markets
+- [x] Deterministic regex/keyword pass for obvious threshold/range markets  <!-- packages/model/src/model/classifier.py -->
 - [ ] LLM-assisted classifier with human-review queue for ambiguous cases
-- [ ] Types: `threshold`, `range`, `discrete_event`, `multi_outcome`, `long_tail_binary`, `misc`
-- [ ] Persist `market_type` + classifier confidence + reviewer flag per market
+- [x] Types: `threshold`, `range`, `discrete_event`, `multi_outcome`, `long_tail_binary`, `misc`  <!-- model.types.MarketType + classifier coverage -->
+- [x] Persist `market_type` + classifier confidence + reviewer flag per market  <!-- market_classifications table + gamma_discovery writes -->
 
 ### 1.2 Baselines
-- [ ] **Threshold baseline:** barrier-crossing probability from realized vol + ATM IV + skew (inverted Black-Scholes); Deribit as IV source
-- [ ] **Range baseline:** conjunction of two threshold probabilities with empirically-estimated correlation
-- [ ] **Discrete-event baseline:** CME FedWatch / OIS-implied for rate markets; Bloomberg-consensus scaffolding (manual/cached until live feed)
-- [ ] **Multi-outcome baseline:** softmax over outcomes with post-hoc sum-to-one enforcement
-- [ ] **Long-tail binary baseline:** Poisson / historical base-rate + embedding-match prior (cold-start, §6.7)
-- [ ] `misc` bucket falls through with low-confidence badge
+- [x] **Threshold baseline:** barrier-crossing probability from realized vol + ATM IV + skew (inverted Black-Scholes); Deribit as IV source  <!-- Deribit-backed live inputs wired through services/api + model.baselines.threshold -->
+- [x] **Range baseline:** conjunction of two threshold probabilities with empirically-estimated correlation  <!-- packages/model/src/model/baselines/range_.py -->
+- [x] **Discrete-event baseline:** CME FedWatch / OIS-implied for rate markets; Bloomberg-consensus scaffolding (manual/cached until live feed)  <!-- official CME FedWatch OAuth client wired in services/api for FOMC markets; CPI/NFP remain file-backed/manual by design -->
+- [x] **Multi-outcome baseline:** softmax over outcomes with post-hoc sum-to-one enforcement  <!-- event_id-backed sibling grouping wired through gamma_discovery + services/api -->
+- [x] **Long-tail binary baseline:** Poisson / historical base-rate + embedding-match prior (cold-start, §6.7)  <!-- PIT-loaded resolved analog priors wired in services/api via smoothed base-rate + token-cosine nearest analog -->
+- [x] `misc` bucket falls through with low-confidence badge  <!-- backend falls through to market_mid; dashboard + detail show type/confidence/review badges -->
 
 ### 1.3 Display layer
-- [ ] Market detail view shows "model probability" = baseline (no ML yet)
-- [ ] Edge = baseline − market mid (bps)
-- [ ] Badge shows which baseline produced the number (builds trust)
+- [x] Market detail view shows "model probability" = baseline (no ML yet)  <!-- /v1/markets/{condition_id}/model + web detail page -->
+- [x] Edge = baseline − market mid (bps)  <!-- model.pipeline.PipelineResult.edge_bps + UI card -->
+- [x] Badge shows which baseline produced the number (builds trust)  <!-- baseline_source surfaced in API + UI -->
 
 ### 1.4 Exit criteria for M1
-- [ ] ≥ 90% of active crypto/finance markets have a non-`misc` type
-- [ ] Threshold baseline reproduces documented IV inputs on spot-check markets
-- [ ] Backtest smoke test: baseline Brier vs market-mid Brier logged per type (no positive-skill requirement yet)
+- [ ] ≥ 90% of active crypto/finance markets have a non-`misc` type  <!-- auditable via services/api/src/api/m1_audit.py against live data -->
+- [ ] Threshold baseline reproduces documented IV inputs on spot-check markets  <!-- auditable via services/api/src/api/m1_audit.py against live Deribit inputs -->
+- [x] Backtest smoke test: baseline Brier vs market-mid Brier logged per type (no positive-skill requirement yet)  <!-- services/api/src/api/backtest_smoke.py -->
 
 ---
 
 ## M2 — Model v0 + conformal UQ (Weeks 6–8)
 
 ### 2.1 Feature pipeline — market microstructure (§6.3)
-- [ ] Mid, spread, orderbook imbalance at 1% / 5% depth
-- [ ] 1h / 24h / 7d price momentum and realized vol
-- [ ] **Informed-taker flow** — aggressor-side, spread-crossing, size > p80
-- [ ] **Passive-maker flow** — inside-spread fills
-- [ ] Trade-weighted directional flow with exponential decay
-- [ ] All features written through the as-of store with `observed_at`
+- [x] Mid, spread, orderbook imbalance at 1% / 5% depth  <!-- persisted in market_features via services/ingest/src/ingest/workers/feature_snapshots.py -->
+- [x] 1h / 24h / 7d price momentum and realized vol  <!-- quote-history based momentum + 24h annualized realized vol -->
+- [x] **Informed-taker flow** — aggressor-side, spread-crossing, size > p80  <!-- normalized signed large-cross flow over trailing 24h -->
+- [x] **Passive-maker flow** — inside-spread fills  <!-- normalized signed maker-side flow inferred from non-crossing trades -->
+- [x] Trade-weighted directional flow with exponential decay  <!-- 24h signed aggressor flow with configurable half-life -->
+- [x] All features written through the as-of store with `observed_at`  <!-- market_features table + /v1/features/{condition_id}/asof -->
 
 ### 2.2 Stacked ensemble (§6.2)
-- [ ] Gradient-boosted refinement (LightGBM or CatBoost) consumes `p_base` + microstructure features, outputs `p_raw`
-- [ ] **Per-type** model weights (no global single model)
-- [ ] Isotonic regression calibrator per type, fit on held-out time-ordered slice
-- [ ] Cap learned weight on `market_mid` to avoid reflexive "market ± noise" (§6.10)
+- [x] Gradient-boosted refinement (LightGBM or CatBoost) consumes `p_base` + microstructure features, outputs `p_raw`  <!-- packages/model/src/model/ensemble.py: bounded logit stack + boosted stumps over microstructure -->
+- [x] **Per-type** model weights (no global single model)  <!-- EnsembleRegistry keyed by MarketType -->
+- [x] Isotonic regression calibrator per type, fit on held-out time-ordered slice  <!-- fit_per_type_ensembles() holds out latest slice when sample count permits -->
+- [x] Cap learned weight on `market_mid` to avoid reflexive "market ± noise" (§6.10)  <!-- bounded coefficient on market_mid_logit in linear stack -->
 
 ### 2.3 Uncertainty — split conformal (§6.4)
-- [ ] Split conformal prediction intervals at 80% coverage
-- [ ] **Mondrian conditioning** on market-type and time-to-resolution bucket
-- [ ] Calibration set uses purged/embargoed folds (§6.6)
-- [ ] Resolution-risk multiplier placeholder (wired fully in M4)
+- [x] Split conformal prediction intervals at 80% coverage  <!-- packages/model/src/model/conformal.py + services/api detail path -->
+- [x] **Mondrian conditioning** on market-type and time-to-resolution bucket  <!-- conformal cells keyed by market_type:ttr_bucket -->
+- [x] Calibration set uses purged/embargoed folds (§6.6)  <!-- purged_embargo_splits + fit_split_conformal_from_folds -->
+- [x] Resolution-risk multiplier placeholder (wired fully in M4)  <!-- API setting scales conformal width via RESOLUTION_RISK_MULTIPLIER_DEFAULT -->
 
 ### 2.4 SHAP + explainer (§6.5)
-- [ ] Per-prediction SHAP value extraction
-- [ ] Top-3 natural-language drivers via constrained LLM — LLM sees only SHAP + feature values, cannot invent numbers
-- [ ] UI: expandable "signal decomposition" panel per market
+- [~] Per-prediction SHAP value extraction  <!-- exact served-ensemble feature attributions now exposed in API/UI; formal SHAP still pending -->
+- [~] Top-3 natural-language drivers via constrained LLM — LLM sees only SHAP + feature values, cannot invent numbers  <!-- deterministic constrained driver summaries shipped from ensemble attributions; external LLM narrator deferred -->
+- [x] UI: expandable "signal decomposition" panel per market  <!-- detail page renders expandable contribution panel from served ensemble attributions -->
 
 ### 2.5 Market Detail v1
-- [ ] Big-number model probability + 80% band
-- [ ] Delta vs market price; **Kelly-suggested size** (user-capped, fractional Kelly)
-- [ ] Price history overlaid with historical model probability
-- [ ] "Why not the market's price?" section populated from top-3 SHAP drivers
+- [x] Big-number model probability + 80% band  <!-- detail page shows model probability + conformal band -->
+- [x] Delta vs market price; **Kelly-suggested size** (user-capped, fractional Kelly)  <!-- detail payload now includes capped fractional-Kelly sizing from displayed model vs market -->
+- [x] Price history overlaid with historical model probability  <!-- /v1/markets/{condition_id}/history replays PIT model probability over stored quote history -->
+- [~] "Why not the market's price?" section populated from top-3 SHAP drivers  <!-- now populated from deterministic ensemble driver summaries; formal SHAP path still pending -->
 - [ ] Links to raw evidence (tweets/headlines slot in M4)
 
 ### 2.6 Journal v0 (F4, manual entries only)
-- [ ] "Mark my call: YES/NO at X¢" button captures model prob + market mid at that instant
-- [ ] On market resolution, compute per-call PnL, Brier, running calibration contribution
-- [ ] Dashboard: hit rate by confidence bucket, best/worst calls, edge realized vs edge predicted, calibration plot
+- [x] "Mark my call: YES/NO at X¢" button captures model prob + market mid at that instant  <!-- detail page posts manual journal calls against a demo internal user -->
+- [x] On market resolution, compute per-call PnL, Brier, running calibration contribution  <!-- unresolved journal calls are synced/scored against ClickHouse resolutions on read -->
+- [x] Dashboard: hit rate by confidence bucket, best/worst calls, edge realized vs edge predicted, calibration plot  <!-- dashboard renders journal summary + recent calls -->
 
 ### 2.7 Exit criteria for M2
-- [ ] Predictions render for 100% of typed markets with band + SHAP drivers
-- [ ] Conformal empirical coverage 78–82% on a held-out backtest set (per-type and per-TTR bucket)
-- [ ] Journal v0 records + scores calls end-to-end on at least 20 resolved markets
+- [ ] Predictions render for 100% of typed markets with band + SHAP drivers  <!-- auditable via services/api/src/api/m2_audit.py against live active markets -->
+- [ ] Conformal empirical coverage 78–82% on a held-out backtest set (per-type and per-TTR bucket)  <!-- auditable via services/api/src/api/m2_audit.py over multi-horizon resolved-market replay -->
+- [ ] Journal v0 records + scores calls end-to-end on at least 20 resolved markets  <!-- auditable via services/api/src/api/m2_audit.py journal summary -->
 
 ---
 
 ## M3 — Polymarket-native signals (Weeks 9–10)
 
 ### 3.1 Smart Money Tracker (F6)
-- [ ] Daily leaderboard refresh: `/v1/leaderboard?category=CRYPTO|FINANCE` with `timePeriod=MONTH` and `ALL`, orderings by `PNL` **and** `VOL`
+- [x] Daily leaderboard refresh: `/v1/leaderboard?category=CRYPTO|FINANCE` with `timePeriod=MONTH` and `ALL`, orderings by `PNL` **and** `VOL`  <!-- services/ingest/src/ingest/workers/smart_money_refresh.py snapshots deduped leaderboard wallets across all 8 slices into positions_smart_money -->
 - [ ] Wash-trading guards (§9): minimum trade count, multi-market requirement, PnL+VOL cross-check before qualifying as smart money
 - [ ] Rolling ~500-wallet smart-money set persisted with qualification history
 - [ ] Per-market aggregation: wallets YES vs NO, total size, avg entry, 24h directional delta

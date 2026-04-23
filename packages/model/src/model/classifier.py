@@ -42,7 +42,7 @@ class MarketFeatures:
 @dataclass(frozen=True)
 class ClassificationResult:
     market_type: MarketType
-    confidence: float                  # 0.0–1.0
+    confidence: float                  # 0.0-1.0
     features: MarketFeatures
     reasons: list[str] = field(default_factory=list)
 
@@ -70,6 +70,8 @@ _ASSET_PATTERNS = [
 _DOLLAR_RE = re.compile(
     r"\$?\s*(?P<num>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?P<mag>[kKmMbB]?)\b"
 )
+_NUMBER_PATTERN = r"\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?"
+_OPTIONAL_MAG_SUFFIX_PATTERN = r"(?:\s*(?P<mag>[kKmMbB]))?(?![A-Za-z])"
 
 _THRESHOLD_KEYWORDS = (
     "above",
@@ -92,8 +94,8 @@ _THRESHOLD_KEYWORDS = (
 _BELOW_KEYWORDS = {"below", "under", "less than", "lower than", "<"}
 
 _RANGE_RE = re.compile(
-    r"between\s+\$?(?P<lo>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?P<lo_mag>[kKmMbB]?)"
-    r"\s+and\s+\$?(?P<hi>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?P<hi_mag>[kKmMbB]?)",
+    rf"between\s+\$?(?P<lo>{_NUMBER_PATTERN})(?:\s*(?P<lo_mag>[kKmMbB]))?(?![A-Za-z])"
+    rf"\s+and\s+\$?(?P<hi>{_NUMBER_PATTERN})(?:\s*(?P<hi_mag>[kKmMbB]))?(?![A-Za-z])",
     re.IGNORECASE,
 )
 
@@ -151,7 +153,7 @@ def _find_strike(text: str) -> tuple[float, str] | None:
     for kw in _THRESHOLD_KEYWORDS:
         pattern = re.compile(
             rf"\b{re.escape(kw)}\b[^.?!]*?"
-            r"(?P<num>\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(?P<mag>[kKmMbB]?)",
+            rf"(?P<num>{_NUMBER_PATTERN}){_OPTIONAL_MAG_SUFFIX_PATTERN}",
             re.IGNORECASE,
         )
         m = pattern.search(text)

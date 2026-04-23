@@ -6,7 +6,6 @@ import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from model import (
     BaselineInputs,
     BaselineSource,
@@ -29,6 +28,7 @@ def _inputs(
     days_to_resolution: float,
     iv: float | None = 0.6,
     iv_strike: float | None = None,
+    realized_vol: float | None = None,
 ) -> BaselineInputs:
     resolution = datetime(2026, 4, 22, tzinfo=UTC) + timedelta(days=days_to_resolution)
     features = MarketFeatures(
@@ -41,6 +41,7 @@ def _inputs(
         features=features,
         asked_at=_asked_at(),
         spot=spot,
+        realized_vol=realized_vol,
         implied_vol_atm=iv,
         implied_vol_strike=iv_strike,
     )
@@ -167,6 +168,28 @@ def test_monotone_in_vol() -> None:
     high = threshold_baseline(high_iv)
     assert low.probability is not None and high.probability is not None
     assert high.probability > low.probability
+
+
+def test_realized_vol_anchors_sigma_when_implied_vol_is_low() -> None:
+    no_rv = _inputs(
+        spot=100_000,
+        strike=150_000,
+        direction="above",
+        days_to_resolution=90,
+        iv=0.3,
+    )
+    with_rv = _inputs(
+        spot=100_000,
+        strike=150_000,
+        direction="above",
+        days_to_resolution=90,
+        iv=0.3,
+        realized_vol=0.9,
+    )
+    low = threshold_baseline(no_rv)
+    anchored = threshold_baseline(with_rv)
+    assert low.probability is not None and anchored.probability is not None
+    assert anchored.probability > low.probability
 
 
 def test_monotone_in_horizon() -> None:

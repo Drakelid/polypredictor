@@ -21,6 +21,8 @@ T = TypeVar("T")
 class CacheEntry(Generic[T]):
     value: T
     expires_at: float
+    etag: str | None = None
+    last_modified: str | None = None
 
 
 class TTLCache(Generic[T]):
@@ -36,23 +38,58 @@ class TTLCache(Generic[T]):
         return time.monotonic()
 
     async def get(self, key: str) -> T | None:
+        entry = await self.get_entry(key)
+        return entry.value if entry is not None else None
+
+    async def get_entry(self, key: str, *, allow_stale: bool = False) -> CacheEntry[T] | None:
         async with self._lock:
             entry = self._store.get(key)
             if entry is None:
                 return None
-            if entry.expires_at <= self._now():
+            if allow_stale:
+                return entry
+            if self.is_expired(entry):
                 del self._store[key]
                 return None
-            return entry.value
+            return entry
 
-    async def set(self, key: str, value: T, *, ttl_s: float) -> None:
+    def is_expired(self, entry: CacheEntry[T]) -> bool:
+        return entry.expires_at <= self._now()
+
+    async def set(
+        self,
+        key: str,
+        value: T,
+        *,
+        ttl_s: float,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> None:
         async with self._lock:
             if len(self._store) >= self._max_entries:
                 # Drop expired entries first; if that doesn't make room, drop the
                 # soonest-to-expire entry. Good-enough bounded-size policy for
                 # the read-heavy patterns our callers use.
                 self._evict_locked()
-            self._store[key] = CacheEntry(value=value, expires_at=self._now() + ttl_s)
+            self._store[key] = CacheEntry(
+                value=value,
+                expires_at=self._now() + ttl_s,
+                etag=etag,
+                last_modified=last_modified,
+            )
+
+    async def refresh(self, key: str, *, ttl_s: float) -> bool:
+        async with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return False
+            self._store[key] = CacheEntry(
+                value=entry.value,
+                expires_at=self._now() + ttl_s,
+                etag=entry.etag,
+                last_modified=entry.last_modified,
+            )
+            return True
 
     def _evict_locked(self) -> None:
         now = self._now()

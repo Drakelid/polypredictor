@@ -152,6 +152,47 @@ async def quotes_timeseries_asof(
     ]
 
 
+async def quotes_timeseries_pit(
+    ch: AsyncClient,
+    token_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[QuoteRow]:
+    """Return historical quotes using only rows known at each quote timestamp.
+
+    Unlike :func:`quotes_timeseries_asof`, this is for replaying the model over
+    history. Each point keeps the latest row for that ``event_time`` whose
+    ``observed_at <= event_time``, so later corrections cannot leak backwards.
+    """
+    query = """
+        SELECT token_id, condition_id, mid, best_bid, best_ask, spread,
+               event_time, observed_at
+        FROM market_quotes
+        WHERE token_id = {tok:String}
+          AND event_time BETWEEN {start:DateTime64(3)} AND {end:DateTime64(3)}
+          AND observed_at <= event_time
+        ORDER BY event_time, observed_at DESC
+        LIMIT 1 BY token_id, event_time
+    """
+    result = await ch.query(
+        query,
+        parameters={"tok": token_id, "start": start, "end": end},
+    )
+    return [
+        QuoteRow(
+            token_id=r[0],
+            condition_id=r[1],
+            mid=float(r[2]),
+            best_bid=float(r[3]),
+            best_ask=float(r[4]),
+            spread=float(r[5]),
+            event_time=r[6],
+            observed_at=r[7],
+        )
+        for r in result.result_rows
+    ]
+
+
 async def resolution_asof(
     ch: AsyncClient, condition_id: str, asked_at: datetime
 ) -> tuple[str, datetime] | None:

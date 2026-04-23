@@ -73,6 +73,7 @@ class GammaClient:
             endpoint_class="markets",
             params=params,
             ttl_s=TTL_MARKETS,
+            conditional_cache=True,
         )
         return [_to_market(m) for m in raw]
 
@@ -97,6 +98,7 @@ class GammaClient:
             endpoint_class="events",
             params=params,
             ttl_s=TTL_EVENTS,
+            conditional_cache=True,
         )
         events: list[Event] = []
         for ev in raw:

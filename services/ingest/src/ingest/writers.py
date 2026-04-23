@@ -12,7 +12,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from polymarket_client import Market
+from polymarket_client import Market, Position, PriceHistoryBucket
 
 # -- markets_snapshots --------------------------------------------------------
 
@@ -39,13 +39,15 @@ MARKETS_COLS = (
 )
 
 
-def market_row(m: Market, *, observed_at: datetime, event_id: str = "") -> tuple[Any, ...]:
+def market_row(m: Market, *, observed_at: datetime) -> tuple[Any, ...]:
     """Shape a :class:`Market` into a ``markets_snapshots`` row."""
     event_time = observed_at
+    event_id = m.event_id or ""
     payload_hash = hashlib.sha256(
         json.dumps(
             {
                 "cid": m.condition_id,
+                "eid": event_id,
                 "q": m.question,
                 "active": m.active,
                 "closed": m.closed,
@@ -198,6 +200,160 @@ def trade_row(
         aggressor_side.lower() if aggressor_side else None,
         None if crossed_spread is None else (1 if crossed_spread else 0),
         event_time,
+        observed_at,
+    )
+
+
+# -- prices_history -----------------------------------------------------------
+
+PRICES_HISTORY_COLS = (
+    "token_id",
+    "condition_id",
+    "interval_bucket",
+    "bucket_start",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "event_time",
+    "observed_at",
+)
+
+
+def price_history_rows(
+    *,
+    token_id: str,
+    condition_id: str,
+    interval_bucket: str,
+    history: list[PriceHistoryBucket],
+    observed_at: datetime,
+) -> list[tuple[Any, ...]]:
+    """Shape ``/prices-history`` buckets into ``prices_history`` rows.
+
+    The public CLOB endpoint currently exposes bucket timestamps plus a single
+    price field. Until Polymarket publishes full OHLCV, we canonicalize that
+    price into open/high/low/close and leave volume at 0.0. This keeps the PIT
+    history populated for charts and feature bootstrapping without inventing
+    data we don't have.
+    """
+    rows: list[tuple[Any, ...]] = []
+    for bucket in history:
+        bucket_start = datetime.fromtimestamp(bucket.t, tz=UTC)
+        price = float(bucket.p)
+        rows.append(
+            (
+                token_id,
+                condition_id,
+                interval_bucket,
+                bucket_start,
+                price,
+                price,
+                price,
+                price,
+                0.0,
+                bucket_start,
+                observed_at,
+            )
+        )
+    return rows
+
+
+# -- positions_smart_money ----------------------------------------------------
+
+SMART_MONEY_POSITIONS_COLS = (
+    "proxy_wallet",
+    "condition_id",
+    "token_id",
+    "outcome",
+    "size",
+    "avg_entry_price",
+    "current_value_usdc",
+    "leaderboard_rank",
+    "leaderboard_pnl",
+    "leaderboard_vol",
+    "event_time",
+    "observed_at",
+)
+
+
+def smart_money_position_row(
+    *,
+    position: Position,
+    leaderboard_rank: int | None,
+    leaderboard_pnl: float | None,
+    leaderboard_vol: float | None,
+    observed_at: datetime,
+) -> tuple[Any, ...]:
+    return (
+        position.proxy_wallet,
+        position.condition_id,
+        position.token_id,
+        position.outcome.upper(),
+        float(position.size),
+        float(position.avg_price),
+        float(position.current_value),
+        leaderboard_rank,
+        leaderboard_pnl,
+        leaderboard_vol,
+        observed_at,
+        observed_at,
+    )
+
+
+# -- market_features ----------------------------------------------------------
+
+MARKET_FEATURES_COLS = (
+    "condition_id",
+    "token_id",
+    "mid",
+    "spread",
+    "book_imbalance_1pct",
+    "book_imbalance_5pct",
+    "momentum_1h",
+    "momentum_24h",
+    "momentum_7d",
+    "realized_vol_24h",
+    "informed_taker_flow_24h",
+    "passive_maker_flow_24h",
+    "decayed_directional_flow_24h",
+    "event_time",
+    "observed_at",
+)
+
+
+def market_features_row(
+    *,
+    condition_id: str,
+    token_id: str,
+    mid: float,
+    spread: float,
+    book_imbalance_1pct: float | None,
+    book_imbalance_5pct: float | None,
+    momentum_1h: float | None,
+    momentum_24h: float | None,
+    momentum_7d: float | None,
+    realized_vol_24h: float | None,
+    informed_taker_flow_24h: float | None,
+    passive_maker_flow_24h: float | None,
+    decayed_directional_flow_24h: float | None,
+    observed_at: datetime,
+) -> tuple[Any, ...]:
+    return (
+        condition_id,
+        token_id,
+        float(mid),
+        float(spread),
+        book_imbalance_1pct,
+        book_imbalance_5pct,
+        momentum_1h,
+        momentum_24h,
+        momentum_7d,
+        realized_vol_24h,
+        informed_taker_flow_24h,
+        passive_maker_flow_24h,
+        decayed_directional_flow_24h,
+        observed_at,
         observed_at,
     )
 

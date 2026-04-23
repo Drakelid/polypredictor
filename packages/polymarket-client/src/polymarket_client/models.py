@@ -24,6 +24,7 @@ class Market(_Base):
     """Subset of the Gamma ``/markets`` shape used downstream."""
 
     condition_id: str = Field(alias="conditionId")
+    event_id: str | None = Field(default=None, alias="eventId")
     question: str
     slug: str
     description: str = ""

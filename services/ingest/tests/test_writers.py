@@ -8,20 +8,25 @@ import pytest
 from ingest.writers import (
     MARKETS_COLS,
     ORDERBOOK_COLS,
+    PRICES_HISTORY_COLS,
     QUOTES_COLS,
+    SMART_MONEY_POSITIONS_COLS,
     TRADES_COLS,
     market_row,
     orderbook_rows,
+    price_history_rows,
     quote_row,
+    smart_money_position_row,
     trade_row,
 )
-from polymarket_client import Market
+from polymarket_client import Market, Position, PriceHistoryBucket
 
 
 def _sample_market() -> Market:
     return Market.model_validate(
         {
             "conditionId": "0xabc",
+            "eventId": "evt-1",
             "question": "Will BTC > $150k?",
             "slug": "btc-150k",
             "description": "yes means yes",
@@ -45,6 +50,7 @@ def test_market_row_positional_columns_match_schema() -> None:
     assert len(row) == len(MARKETS_COLS)
     by = dict(zip(MARKETS_COLS, row, strict=True))
     assert by["condition_id"] == "0xabc"
+    assert by["event_id"] == "evt-1"
     assert by["active"] == 1
     assert by["closed"] == 0
     assert by["archived"] == 0
@@ -135,3 +141,68 @@ def test_trade_row_normalizes_side() -> None:
     assert by["side"] == "buy"
     assert by["aggressor_side"] is None
     assert by["crossed_spread"] is None
+
+
+def test_price_history_rows_canonicalize_close_only_buckets() -> None:
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    rows = price_history_rows(
+        token_id="tok-yes",
+        condition_id="0xabc",
+        interval_bucket="1h",
+        history=[
+            PriceHistoryBucket(t=int(datetime(2026, 1, 1, tzinfo=UTC).timestamp()), p=0.42),
+            PriceHistoryBucket(t=int(datetime(2026, 1, 1, 1, tzinfo=UTC).timestamp()), p=0.45),
+        ],
+        observed_at=now,
+    )
+    assert len(rows) == 2
+    first = dict(zip(PRICES_HISTORY_COLS, rows[0], strict=True))
+    assert first["token_id"] == "tok-yes"
+    assert first["condition_id"] == "0xabc"
+    assert first["interval_bucket"] == "1h"
+    assert first["bucket_start"] == datetime(2026, 1, 1, tzinfo=UTC)
+    assert first["open"] == pytest.approx(0.42)
+    assert first["high"] == pytest.approx(0.42)
+    assert first["low"] == pytest.approx(0.42)
+    assert first["close"] == pytest.approx(0.42)
+    assert first["volume"] == 0.0
+    assert first["event_time"] == datetime(2026, 1, 1, tzinfo=UTC)
+    assert first["observed_at"] == now
+
+
+def test_smart_money_position_row_shapes_leaderboard_context() -> None:
+    now = datetime(2026, 1, 2, tzinfo=UTC)
+    position = Position.model_validate(
+        {
+            "proxyWallet": "0xwallet",
+            "conditionId": "cond-1",
+            "asset": "tok-yes",
+            "outcome": "yes",
+            "size": 125.0,
+            "avgPrice": 0.41,
+            "currentValue": 73.5,
+            "cashPnl": 22.0,
+        }
+    )
+
+    row = smart_money_position_row(
+        position=position,
+        leaderboard_rank=7,
+        leaderboard_pnl=15_000.0,
+        leaderboard_vol=250_000.0,
+        observed_at=now,
+    )
+
+    by = dict(zip(SMART_MONEY_POSITIONS_COLS, row, strict=True))
+    assert by["proxy_wallet"] == "0xwallet"
+    assert by["condition_id"] == "cond-1"
+    assert by["token_id"] == "tok-yes"
+    assert by["outcome"] == "YES"
+    assert by["size"] == pytest.approx(125.0)
+    assert by["avg_entry_price"] == pytest.approx(0.41)
+    assert by["current_value_usdc"] == pytest.approx(73.5)
+    assert by["leaderboard_rank"] == 7
+    assert by["leaderboard_pnl"] == pytest.approx(15_000.0)
+    assert by["leaderboard_vol"] == pytest.approx(250_000.0)
+    assert by["event_time"] == now
+    assert by["observed_at"] == now

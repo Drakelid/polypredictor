@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from model import (
     BaselineInputs,
     BaselineSource,
@@ -15,7 +14,7 @@ from model import (
     multi_outcome_baseline,
     range_baseline,
 )
-
+from model.baselines.range_ import _estimate_range_correlation, _joint_probability_from_correlation
 
 _asked = datetime(2026, 4, 22, tzinfo=UTC).timestamp()
 
@@ -52,6 +51,89 @@ def test_range_baseline_inverted_bounds_still_works() -> None:
     )
     out = range_baseline(inp)
     assert out.probability == 0.0
+
+
+def test_range_baseline_realized_vol_can_widen_the_distribution() -> None:
+    features = MarketFeatures(
+        asset="BTC",
+        range_low=95_000,
+        range_high=105_000,
+        direction="between",
+        resolution_date=datetime(2026, 4, 22, tzinfo=UTC) + timedelta(days=30),
+    )
+    iv_only = BaselineInputs(
+        features=features,
+        asked_at=_asked,
+        spot=100_000,
+        implied_vol_atm=0.2,
+    )
+    blended = BaselineInputs(
+        features=features,
+        asked_at=_asked,
+        spot=100_000,
+        realized_vol=0.8,
+        implied_vol_atm=0.2,
+    )
+    narrow = range_baseline(iv_only)
+    wide = range_baseline(blended)
+    assert narrow.probability is not None and wide.probability is not None
+    assert wide.probability < narrow.probability
+
+
+def test_range_baseline_uses_negative_correlation_vs_independence() -> None:
+    features = MarketFeatures(
+        asset="BTC",
+        range_low=95_000,
+        range_high=105_000,
+        direction="between",
+        resolution_date=datetime(2026, 4, 22, tzinfo=UTC) + timedelta(days=30),
+    )
+    inp = BaselineInputs(
+        features=features,
+        asked_at=_asked,
+        spot=100_000,
+        implied_vol_atm=0.4,
+    )
+    out = range_baseline(inp)
+    assert out.probability is not None
+
+    reason = out.reasons[0]
+    parts = {
+        item.split("=", 1)[0]: item.split("=", 1)[1]
+        for item in reason.split()
+        if "=" in item
+    }
+    p_ge_lo = float(parts["p_ge_lo"])
+    p_le_hi = float(parts["p_le_hi"])
+    rho = float(parts["rho"])
+
+    assert rho < 0.0
+    assert out.probability < p_ge_lo * p_le_hi
+
+
+def test_range_correlation_is_more_negative_for_narrower_ranges() -> None:
+    narrow = _estimate_range_correlation(
+        spot=100_000,
+        lo=99_000,
+        hi=101_000,
+        sigma=0.4,
+        T=30 / 365.25,
+        r=0.0,
+    )
+    wide = _estimate_range_correlation(
+        spot=100_000,
+        lo=80_000,
+        hi=120_000,
+        sigma=0.4,
+        T=30 / 365.25,
+        r=0.0,
+    )
+    assert narrow < wide
+
+
+def test_range_joint_probability_respects_frechet_bounds() -> None:
+    joint = _joint_probability_from_correlation(0.8, 0.7, -0.95)
+    assert 0.5 <= joint <= 0.7
 
 
 def test_multi_outcome_softmax_normalizes() -> None:

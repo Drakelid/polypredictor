@@ -6,6 +6,8 @@ import httpx
 import pytest
 import respx
 from polymarket_client import GammaClient
+from polymarket_client import gamma as gamma_mod
+from polymarket_client.cache import TTLCache
 
 
 @pytest.mark.asyncio
@@ -58,3 +60,36 @@ async def test_list_markets_empty_clob_token_ids_string_ok() -> None:
     async with GammaClient() as g:
         markets = await g.list_markets()
     assert markets[0].token_ids == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_markets_revalidates_with_etag_when_ttl_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gamma_mod, "TTL_MARKETS", 0.0)
+    route = respx.get("https://gamma-api.polymarket.com/markets").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json=[
+                    {
+                        "conditionId": "0xabc",
+                        "question": "Will BTC > $150k?",
+                        "slug": "btc-150k",
+                        "active": True,
+                        "closed": False,
+                        "clobTokenIds": '["tok-yes", "tok-no"]',
+                    }
+                ],
+                headers={"etag": '"markets-v1"'},
+            ),
+            httpx.Response(304),
+        ]
+    )
+    async with GammaClient(cache=TTLCache()) as g:
+        first = await g.list_markets()
+        second = await g.list_markets()
+    assert first[0].condition_id == second[0].condition_id
+    assert route.call_count == 2
+    assert route.calls.last.request.headers["if-none-match"] == '"markets-v1"'

@@ -33,7 +33,7 @@ class PipelineResult:
 
     @property
     def edge_bps(self) -> float | None:
-        """Model − market, in basis points. ``None`` if either side is missing."""
+        """Model - market, in basis points. ``None`` if either side is missing."""
         p = self.displayed_probability
         m = self._mid
         if p is None or m is None:

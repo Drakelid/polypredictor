@@ -1,4 +1,4 @@
-.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob
+.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money
 
 help:
 	@echo "Common targets:"
@@ -15,6 +15,8 @@ help:
 	@echo "  make fmt             # ruff format"
 	@echo "  make ingest-discover # run gamma discovery worker once"
 	@echo "  make ingest-clob     # run CLOB poller worker once"
+	@echo "  make ingest-features # run market feature snapshot worker once"
+	@echo "  make ingest-smart-money # run smart-money refresh worker"
 
 install:
 	uv sync
@@ -56,3 +58,9 @@ ingest-discover:
 
 ingest-clob:
 	uv run python -m ingest.workers.clob_poller
+
+ingest-features:
+	uv run python -c "import asyncio; from ingest.workers.feature_snapshots import run_once; count = asyncio.run(run_once()); print(f'wrote {count} market feature snapshots')"
+
+ingest-smart-money:
+	uv run python -m ingest.workers.smart_money_refresh

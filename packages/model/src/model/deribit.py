@@ -17,6 +17,7 @@ Deribit quotes IV in percentage points; we convert to decimal.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -29,6 +30,7 @@ log = structlog.get_logger(__name__)
 class DeribitIV:
     index_price: float
     expiry_days: float
+    realized_vol: float | None   # decimal, latest realized vol from public history
     atm_iv: float              # decimal (0.65 = 65%)
     strike_iv: float           # decimal, interpolated at the requested strike
     atm_instrument: str
@@ -38,9 +40,18 @@ class DeribitIV:
 class DeribitClient:
     """Thin async wrapper around Deribit's public REST."""
 
-    def __init__(self, *, base_url: str = "https://www.deribit.com/api/v2", timeout_s: float = 10.0) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://www.deribit.com/api/v2",
+        timeout_s: float = 10.0,
+        cache_ttl_s: float = 30.0,
+    ) -> None:
         self._base = base_url.rstrip("/")
         self._client = httpx.AsyncClient(base_url=self._base, timeout=timeout_s)
+        self._cache_ttl_s = cache_ttl_s
+        self._book_summary_cache: dict[str, tuple[float, list[dict[str, object]]]] = {}
+        self._historical_vol_cache: dict[str, tuple[float, float | None]] = {}
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -64,15 +75,7 @@ class DeribitClient:
         Returns ``None`` if Deribit has no usable options for the horizon.
         """
         kind = "call" if direction == "above" else "put"
-        r = await self._client.get(
-            "/public/get_book_summary_by_currency",
-            params={"currency": currency.upper(), "kind": "option"},
-        )
-        r.raise_for_status()
-        payload = r.json()
-        if not isinstance(payload, dict) or "result" not in payload:
-            return None
-        rows = payload["result"]
+        rows = await self._book_summary(currency.upper())
         if not isinstance(rows, list) or not rows:
             return None
 
@@ -112,15 +115,58 @@ class DeribitClient:
         if atm_iv_pct is None:
             return None
         strike_iv_pct = strike_iv_pct if strike_iv_pct is not None else atm_iv_pct
+        realized_vol = await self._historical_volatility(currency.upper())
 
         return DeribitIV(
             index_price=float(index_price),
             expiry_days=float(expiry_days),
+            realized_vol=realized_vol,
             atm_iv=float(atm_iv_pct) / 100.0,
             strike_iv=float(strike_iv_pct) / 100.0,
             atm_instrument=str(atm_row.get("instrument_name", "")),
             strike_instrument=str(strike_row.get("instrument_name", "")),
         )
+
+    async def _book_summary(self, currency: str) -> list[dict[str, object]]:
+        cached = self._book_summary_cache.get(currency)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        r = await self._client.get(
+            "/public/get_book_summary_by_currency",
+            params={"currency": currency, "kind": "option"},
+        )
+        r.raise_for_status()
+        payload = r.json()
+        if not isinstance(payload, dict) or "result" not in payload:
+            return []
+        rows = payload["result"]
+        if not isinstance(rows, list):
+            return []
+        normalized = [row for row in rows if isinstance(row, dict)]
+        self._book_summary_cache[currency] = (now + self._cache_ttl_s, normalized)
+        return normalized
+
+    async def _historical_volatility(self, currency: str) -> float | None:
+        cached = self._historical_vol_cache.get(currency)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        r = await self._client.get(
+            "/public/get_historical_volatility",
+            params={"currency": currency},
+        )
+        r.raise_for_status()
+        payload = r.json()
+        if not isinstance(payload, dict) or "result" not in payload:
+            self._historical_vol_cache[currency] = (now + self._cache_ttl_s, None)
+            return None
+        latest_pct = _latest_historical_vol_pct(payload["result"])
+        realized_vol = (latest_pct / 100.0) if latest_pct is not None else None
+        self._historical_vol_cache[currency] = (now + self._cache_ttl_s, realized_vol)
+        return realized_vol
 
 
 # --- Helpers ---------------------------------------------------------------
@@ -207,7 +253,6 @@ def _pick_nearest_expiry(
     from datetime import UTC, datetime
 
     today = datetime.now(tz=UTC)
-    today_sentinel = today.year * 10_000 + today.month * 100 + today.day
     seen: dict[int, int] = {}
     for r in rows:
         info = _parse_instrument(str(r.get("instrument_name", "")))
@@ -234,3 +279,22 @@ def _pick_nearest_expiry(
     if on_or_after:
         return min(on_or_after, key=lambda x: x[1])
     return max(ranked, key=lambda x: x[1])
+
+
+def _latest_historical_vol_pct(rows: object) -> float | None:
+    if not isinstance(rows, list):
+        return None
+    latest_ts = -1
+    latest_val: float | None = None
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:
+            ts = int(row[0])
+            val = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        if ts >= latest_ts:
+            latest_ts = ts
+            latest_val = val
+    return latest_val

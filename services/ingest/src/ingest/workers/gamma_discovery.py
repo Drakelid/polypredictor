@@ -58,6 +58,17 @@ def _classification_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _multi_outcome_sibling_counts(markets: list[Market]) -> dict[str, int]:
+    """Count active siblings per event_id for classifier hints."""
+    counts: dict[str, int] = {}
+    for market in markets:
+        event_id = market.event_id or ""
+        if not event_id:
+            continue
+        counts[event_id] = counts.get(event_id, 0) + 1
+    return counts
+
+
 async def run_once(
     pm: PolymarketClient,
     registry: MarketsRegistry,
@@ -97,9 +108,10 @@ async def run_once(
         if rows:
             await ch.insert("markets_snapshots", rows, column_names=MARKETS_COLS)
 
-        # Classify and persist only changed labels. Multi-outcome sibling count
-        # is driven by token-id arity for binaries (always 2); richer event-group
-        # detection hooks in once the related-tags graph is wired (see §0.5).
+        # Classify and persist only changed labels. Multi-outcome markets rely
+        # on event-level sibling counts from Gamma so the classifier can
+        # distinguish "which/who wins?" event groups from ordinary binaries.
+        sibling_counts = _multi_outcome_sibling_counts(list(all_markets.values()))
         classification_rows: list[tuple[object, ...]] = []
         for m in all_markets.values():
             result = classify(
@@ -109,7 +121,7 @@ async def run_once(
                 resolution_source=m.resolution_source,
                 end_date=m.end_date,
                 outcomes=None,
-                multi_outcome_sibling_count=0,
+                multi_outcome_sibling_count=sibling_counts.get(m.event_id or "", 0),
             )
             f = result.features
             digest = _classification_fingerprint(

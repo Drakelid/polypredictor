@@ -133,3 +133,68 @@ async def test_bypass_cache_always_hits_network() -> None:
     finally:
         await t.aclose()
     assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_conditional_cache_reuses_etagged_response_after_304() -> None:
+    route = respx.get("https://example.test/revalidate").mock(
+        side_effect=[
+            httpx.Response(200, json={"v": 1}, headers={"etag": '"etag-1"'}),
+            httpx.Response(304),
+        ]
+    )
+    t = _transport()
+    try:
+        first = await t.get_json(
+            "/revalidate",
+            endpoint_class="default",
+            ttl_s=0,
+            conditional_cache=True,
+        )
+        second = await t.get_json(
+            "/revalidate",
+            endpoint_class="default",
+            ttl_s=60,
+            conditional_cache=True,
+        )
+    finally:
+        await t.aclose()
+    assert first == {"v": 1}
+    assert second == {"v": 1}
+    assert route.call_count == 2
+    assert route.calls.last.request.headers["if-none-match"] == '"etag-1"'
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_conditional_cache_reuses_last_modified_response_after_304() -> None:
+    route = respx.get("https://example.test/revalidate-lm").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={"v": 2},
+                headers={"last-modified": "Wed, 21 Oct 2015 07:28:00 GMT"},
+            ),
+            httpx.Response(304),
+        ]
+    )
+    t = _transport()
+    try:
+        await t.get_json(
+            "/revalidate-lm",
+            endpoint_class="default",
+            ttl_s=0,
+            conditional_cache=True,
+        )
+        second = await t.get_json(
+            "/revalidate-lm",
+            endpoint_class="default",
+            ttl_s=60,
+            conditional_cache=True,
+        )
+    finally:
+        await t.aclose()
+    assert second == {"v": 2}
+    assert route.call_count == 2
+    assert route.calls.last.request.headers["if-modified-since"] == "Wed, 21 Oct 2015 07:28:00 GMT"

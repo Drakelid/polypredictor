@@ -36,6 +36,18 @@ class IngestSettings(BaseSettings):
     clob_top_n: int = 20  # top-N markets polled every ~5s
     clob_top_interval_s: float = 5.0
     clob_tail_interval_s: float = 60.0
+    prices_history_backfill_interval_s: float = 600.0
+    prices_history_backfill_batch_size: int = 50
+    prices_history_backfill_fidelity: int = 60
+    trades_sweeper_interval_s: float = 30.0
+    trades_sweeper_limit: int = 200
+    trades_sweeper_skip_top_n: int = 20
+    smart_money_refresh_interval_s: float = 86_400.0
+    smart_money_leaderboard_limit: int = 500
+    smart_money_positions_limit: int = 500
+    feature_snapshots_interval_s: float = 300.0
+    feature_snapshots_batch_size: int = 200
+    feature_snapshots_trade_decay_half_life_h: float = 6.0
 
 
 @lru_cache(maxsize=1)

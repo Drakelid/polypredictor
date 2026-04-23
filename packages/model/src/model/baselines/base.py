@@ -25,6 +25,8 @@ class BaselineInputs:
 
     # External: spot + vol + calendar.
     spot: float | None = None
+    # Trailing realized volatility as annualized decimal (e.g. 0.45 = 45%).
+    realized_vol: float | None = None
     # ATM implied volatility as annualized decimal (e.g. 0.6 = 60%).
     implied_vol_atm: float | None = None
     # Vol at the strike — if None, we use ATM with a slight haircut to acknowledge

@@ -83,9 +83,9 @@ def threshold_baseline(inp: BaselineInputs, *, mode: str = "one_touch") -> Basel
             reasons=reasons,
         )
 
-    # Prefer the strike-specific vol; fall back to ATM and widen the band
-    # to reflect skew uncertainty.
-    sigma = inp.implied_vol_strike if inp.implied_vol_strike is not None else inp.implied_vol_atm
+    # Blend forward-looking implied vol with trailing realized vol in variance
+    # space. Strike vol carries the skew term when available.
+    sigma = _effective_sigma(inp.implied_vol_strike, inp.implied_vol_atm, inp.realized_vol)
     skew_fallback = inp.implied_vol_strike is None
     if sigma is None or sigma <= 0:
         return BaselineOutput(
@@ -120,13 +120,19 @@ def threshold_baseline(inp: BaselineInputs, *, mode: str = "one_touch") -> Basel
     widen = 1.0
     if skew_fallback:
         widen *= 1.15
-    # Distant thresholds (>2σ) have more tail-sensitivity than the Gaussian
+    if inp.realized_vol is None or abs(inp.implied_vol_atm - inp.realized_vol) > 0.15:
+        widen *= 1.1
+    # Distant thresholds (>2 sigma) have more tail-sensitivity than the Gaussian
     # assumption captures; nudge the conformal band wider.
     moneyness_sigma = abs(math.log(strike / spot)) / (sigma * math.sqrt(T))
     if moneyness_sigma > 2.0:
         widen *= 1.15
 
-    reasons.append(f"spot={spot:.4g} strike={strike:.4g} sigma={sigma:.3f} T={T:.3f}y mode={mode}")
+    rv = "None" if inp.realized_vol is None else f"{inp.realized_vol:.3f}"
+    reasons.append(
+        f"spot={spot:.4g} strike={strike:.4g} sigma={sigma:.3f} "
+        f"iv_atm={inp.implied_vol_atm:.3f} rv={rv} T={T:.3f}y mode={mode}"
+    )
     return BaselineOutput(
         probability=prob,
         source=source,
@@ -223,6 +229,21 @@ def _one_touch_probability(
     # Numerical safety: clip to [0, 1]. The exponential term can overflow
     # slightly for extreme inputs.
     return float(np.clip(prob, 0.0, 1.0))
+
+
+def _effective_sigma(
+    strike_iv: float | None,
+    atm_iv: float | None,
+    realized_vol: float | None,
+) -> float | None:
+    iv = strike_iv if strike_iv is not None else atm_iv
+    if iv is None or iv <= 0:
+        return None
+    if realized_vol is None or realized_vol <= 0:
+        return float(iv)
+    # Variance-space blend: IV stays dominant as the forward-looking input,
+    # while realized vol anchors against transient option-surface distortion.
+    return math.sqrt(0.75 * (iv**2) + 0.25 * (realized_vol**2))
 
 
 

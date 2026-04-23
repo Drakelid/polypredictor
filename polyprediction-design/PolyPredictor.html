@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PolyPredictor</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="pp-data.js"></script>
+<style>
+:root{
+  --bg:#09090f;--surface:#111420;--surface2:#181c2e;--surface3:#1e2235;
+  --border:#232840;--border2:#2d3354;
+  --text:#e2e4f0;--muted:#5a6080;--muted2:#3d4460;
+  --green:oklch(0.75 0.20 155);--violet:oklch(0.72 0.18 290);
+  --amber:oklch(0.78 0.18 65);--red:oklch(0.68 0.20 25);
+  --green-dim:oklch(0.75 0.20 155 / 0.12);--violet-dim:oklch(0.72 0.18 290 / 0.12);
+  --amber-dim:oklch(0.78 0.18 65 / 0.12);--red-dim:oklch(0.68 0.20 25 / 0.12);
+}
+body.light{
+  --bg:#f4f5fb;--surface:#ffffff;--surface2:#eef0f8;--surface3:#e4e7f2;
+  --border:#d5d9ee;--border2:#c2c8e0;--text:#1a1c2e;--muted:#7880a0;--muted2:#a0a8c0;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:'Space Grotesk',sans-serif;font-size:14px;height:100dvh;overflow:hidden;display:flex;}
+#root{display:flex;width:100%;height:100%;}
+::-webkit-scrollbar{width:4px;height:4px;}::-webkit-scrollbar-track{background:transparent;}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:4px;}
+input::placeholder{color:var(--muted);}input{color-scheme:dark;}
+body.light input{color-scheme:light;}
+@keyframes slideInRight{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes signalFlash{0%{background:transparent}20%{background:oklch(0.75 0.20 155 / .10)}100%{background:transparent}}
+@keyframes tickIn{from{transform:translateY(-4px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes edgeGlow{0%,100%{box-shadow:none}50%{box-shadow:0 0 0 2px var(--green)}}
+#tweaks-panel{position:fixed;bottom:20px;right:20px;z-index:200;background:var(--surface);border:1px solid var(--border2);border-radius:12px;padding:16px;width:220px;box-shadow:0 8px 32px #0009;display:none;}
+#tweaks-panel.visible{display:block;}
+#tweaks-panel h3{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;}
+.tw-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.tw-label{font-size:12px;color:var(--text);}
+.tw-sel{background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:3px 8px;font-size:12px;font-family:inherit;}
+.tw-tog{width:32px;height:18px;border-radius:9px;border:none;cursor:pointer;transition:background .2s;flex-shrink:0;}
+.tw-tog.on{background:var(--green);}.tw-tog.off{background:var(--border2);}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="tweaks-panel">
+  <h3>Tweaks</h3>
+  <div class="tw-row"><span class="tw-label">Chart type</span>
+    <select class="tw-sel" onchange="window.dispatchEvent(new CustomEvent('tweak',{detail:{key:'chart',val:this.value}}))"><option>Area</option><option>Line</option></select></div>
+  <div class="tw-row"><span class="tw-label">Confidence bands</span>
+    <button class="tw-tog on" onclick="this.classList.toggle('on');this.classList.toggle('off');window.dispatchEvent(new CustomEvent('tweak',{detail:{key:'confidence',val:this.classList.contains('on')}}))"></button></div>
+  <div class="tw-row"><span class="tw-label">Compact cards</span>
+    <button class="tw-tog off" onclick="this.classList.toggle('on');this.classList.toggle('off');window.dispatchEvent(new CustomEvent('tweak',{detail:{key:'compact',val:this.classList.contains('on')}}))"></button></div>
+</div>
+
+<script src="pp-detail.jsx" type="text/babel"></script>
+<script src="pp-screens.jsx" type="text/babel"></script>
+
+<script type="text/babel">
+const {useState,useEffect,useCallback,useMemo} = React;
+
+const useIsMobile=()=>{const[m,setM]=useState(window.innerWidth<768);useEffect(()=>{const h=()=>setM(window.innerWidth<768);window.addEventListener("resize",h);return()=>window.removeEventListener("resize",h);},[]);return m;};
+
+/* ── LOGO ── */
+const Logo=()=>(
+  <svg width="26" height="26" viewBox="0 0 28 28" fill="none">
+    <polygon points="14,2 26,9 26,19 14,26 2,19 2,9" stroke="var(--green)" strokeWidth="1.5" fill="none"/>
+    <polygon points="14,7 21,11 21,17 14,21 7,17 7,11" fill="oklch(0.75 0.20 155 / 0.15)" stroke="var(--green)" strokeWidth="1"/>
+    <circle cx="14" cy="14" r="2.5" fill="var(--green)"/>
+    <line x1="14" y1="14" x2="20" y2="9" stroke="var(--green)" strokeWidth="1.5" strokeLinecap="round"/>
+  </svg>
+);
+
+/* ── SPARKLINE ── */
+const Sparkline=({id,color="#888"})=>{
+  const d=CHARTS[id];if(!d)return null;
+  const vals=d.map(v=>v[0]),mn=Math.min(...vals)-3,mx=Math.max(...vals)+3;
+  const W=60,H=20,sx=i=>i/(d.length-1)*W,sy=v=>H-(v-mn)/(mx-mn)*H;
+  const path=d.map((v,i)=>`${i===0?"M":"L"}${sx(i)} ${sy(v[0])}`).join(" ");
+  return(<svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{overflow:"visible",opacity:.7}}><path d={path} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round"/></svg>);
+};
+
+/* ── MARKET CARD ── */
+const MarketCard=({market,onClick,active,compact,search})=>{
+  const edge=market.estimate-market.market;
+  const {tier}=edgeMeta(edge),col=edgeCol(tier,edge);
+  const isStrong=Math.abs(edge)>=8;
+  const sparkCol=edge>0?"var(--green)":"var(--red)";
+
+  // highlight matching search text
+  const q=market.question;
+  const hl=(text)=>{
+    if(!search||search.length<2)return text;
+    const idx=text.toLowerCase().indexOf(search.toLowerCase());
+    if(idx<0)return text;
+    return<>{text.slice(0,idx)}<mark style={{background:"var(--amber)",color:"var(--bg)",borderRadius:2}}>{text.slice(idx,idx+search.length)}</mark>{text.slice(idx+search.length)}</>;
+  };
+
+  return(
+    <div onClick={onClick} style={{background:active?"var(--surface2)":"var(--surface)",
+      border:`1px solid ${active?"var(--border2)":isStrong?"oklch(0.75 0.20 155 / 0.25)":"var(--border)"}`,borderRadius:10,
+      padding:compact?"11px 16px":"15px 18px",cursor:"pointer",transition:"border-color .15s",
+      position:"relative",overflow:"hidden",
+      boxShadow:isStrong&&!active?"0 0 0 1px oklch(0.75 0.20 155 / 0.15), 0 4px 20px oklch(0.75 0.20 155 / 0.06)":active?"0 0 0 1px var(--border2)":"none"}}
+      onMouseEnter={e=>{if(!active)e.currentTarget.style.borderColor="var(--border2)"}}
+      onMouseLeave={e=>{if(!active)e.currentTarget.style.borderColor=isStrong?"oklch(0.75 0.20 155 / 0.25)":"var(--border)"}}>
+      <div style={{position:"absolute",left:0,top:0,bottom:0,width:3,background:col,borderRadius:"10px 0 0 10px",
+        opacity:Math.abs(edge)>=5?1:.3,boxShadow:isStrong?`0 0 8px ${col}`:""}}/>
+      <div style={{display:"flex",gap:10,alignItems:"flex-start",marginBottom:compact?7:10}}>
+        <span style={{background:"var(--surface3)",color:"var(--muted)",fontSize:10,fontWeight:700,letterSpacing:".08em",padding:"2px 7px",borderRadius:4,flexShrink:0,marginTop:1}}>{market.category}</span>
+        <span style={{fontSize:13,fontWeight:500,lineHeight:1.4,flex:1,textWrap:"pretty"}}>{hl(q)}</span>
+        {market.watched&&<span title="Watching" style={{fontSize:12,color:"var(--amber)",flexShrink:0}}>★</span>}
+        {market.daysLeft!=null&&<span style={{fontSize:10,color:market.daysLeft<=4?"var(--red)":"var(--muted)",flexShrink:0,fontFamily:"'JetBrains Mono'"}}>{market.daysLeft}d</span>}
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:14}}>
+        <div><div style={{fontSize:10,color:"var(--muted)",marginBottom:2}}>PP Est.</div>
+          <div style={{fontFamily:"'JetBrains Mono'",fontSize:17,fontWeight:600,color:"var(--green)"}}>{market.estimate}%</div></div>
+        <div style={{width:1,height:26,background:"var(--border)"}}/>
+        <div><div style={{fontSize:10,color:"var(--muted)",marginBottom:2}}>Market</div>
+          <div style={{fontFamily:"'JetBrains Mono'",fontSize:17,fontWeight:500,color:"var(--violet)"}}>{market.market}%</div></div>
+        <div style={{flex:1}}/>
+        {!compact&&<Sparkline id={market.id} color={sparkCol}/>}
+        <div style={{textAlign:"right"}}>
+          <div style={{fontSize:10,color:"var(--muted)",marginBottom:2}}>Edge</div>
+          <div style={{fontFamily:"'JetBrains Mono'",fontSize:14,fontWeight:700,color:col,background:col+"18",padding:"2px 8px",borderRadius:5,
+            boxShadow:isStrong?`inset 0 0 8px ${col}22`:""}}>
+            {edge>0?"+":""}{edge}pp</div>
+        </div>
+      </div>
+      {!compact&&<div style={{display:"flex",gap:4,marginTop:9,alignItems:"center"}}>
+        {market.signals.map((s,i)=>(
+          <span key={i} title={s.src} style={{fontSize:11,opacity:s.strength>.5?1:.3,filter:s.dir>0?"none":s.dir<0?"hue-rotate(300deg)":"grayscale(1)"}}>{s.icon}</span>
+        ))}
+        {/* conflict indicator */}
+        {market.signals.filter(s=>s.dir>0&&s.strength>.4).length>=2&&market.signals.filter(s=>s.dir<0&&s.strength>.4).length>=2&&(
+          <span title="Signal conflict" style={{fontSize:10,color:"var(--amber)",marginLeft:2}}>⚡</span>
+        )}
+        <span style={{fontSize:10,color:"var(--muted)",marginLeft:"auto"}}>Vol ${market.volume} · {market.age}</span>
+      </div>}
+    </div>
+  );
+};
+
+/* ── FILTER TABS ── */
+const FilterTabs=({active,onChange,liveStr})=>{
+  const tabs=["All","BTC","ETH","SOL","Macro","Equities"];
+  return(
+    <div style={{display:"flex",gap:4,marginBottom:14,flexWrap:"wrap"}}>
+      {tabs.map(t=>(
+        <button key={t} onClick={()=>onChange(t)} style={{padding:"4px 11px",borderRadius:6,border:"1px solid",
+          borderColor:active===t?"var(--green)":"var(--border)",background:active===t?"var(--green-dim)":"none",
+          color:active===t?"var(--green)":"var(--muted)",fontSize:12,fontWeight:500,fontFamily:"inherit",cursor:"pointer",transition:"all .15s"}}>{t}</button>
+      ))}
+      <div style={{flex:1}}/>
+      <div style={{fontFamily:"'JetBrains Mono'",fontSize:11,color:"var(--muted)",display:"flex",alignItems:"center",gap:5}}>
+        <span style={{width:7,height:7,borderRadius:"50%",background:"var(--green)",display:"inline-block",boxShadow:"0 0 6px var(--green)"}}/>
+        Live · {liveStr}
+      </div>
+    </div>
+  );
+};
+
+/* ── ALERTS DRAWER ── */
+const AlertsDrawer=({alerts,onRead,onSelectMarket,settings})=>{
+  const typeKey={edge:"alertEdge",diverge:"alertDiverge",move:"alertMove",update:"alertUpdate"};
+  const visible=alerts.filter(a=>settings[typeKey[a.type]]!==false);
+  const alertCol=t=>t==="edge"?"var(--green)":t==="diverge"?"var(--amber)":t==="move"?"var(--violet)":"var(--muted)";
+  const alertIcon=t=>t==="edge"?"⚡":t==="diverge"?"⚠":t==="move"?"↕":"⟳";
+  return(
+    <div style={{position:"fixed",top:0,right:0,width:"min(400px,100vw)",height:"100dvh",background:"var(--surface)",
+      borderLeft:"1px solid var(--border2)",display:"flex",flexDirection:"column",zIndex:100,animation:"slideInRight .25s ease",boxShadow:"-20px 0 60px #000a"}}>
+      <div style={{padding:"16px 20px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:12}}>
+        <div style={{flex:1,fontSize:14,fontWeight:600}}>Alerts</div>
+        <span style={{fontSize:11,color:"var(--muted)",cursor:"pointer"}} onClick={()=>onRead()}>Mark all read</span>
+      </div>
+      {visible.length===0
+        ?<EmptyState icon="🔔" title="No alerts" sub="Alerts you've enabled in Settings will appear here."/>
+        :<div style={{flex:1,overflowY:"auto",padding:"8px 0"}}>
+          {visible.map(a=>{
+            const col=alertCol(a.type),market=MARKETS.find(m=>m.id===a.marketId);
+            return(
+              <div key={a.id} onClick={()=>{onRead(a.id);onSelectMarket(market);}}
+                style={{padding:"14px 20px",borderBottom:"1px solid var(--border)",cursor:"pointer",background:a.read?"none":"var(--surface2)",transition:"background .15s"}}
+                onMouseEnter={e=>e.currentTarget.style.background="var(--surface3)"}
+                onMouseLeave={e=>e.currentTarget.style.background=a.read?"none":"var(--surface2)"}>
+                <div style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                  <div style={{width:28,height:28,borderRadius:8,background:col+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:col,flexShrink:0}}>{alertIcon(a.type)}</div>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4}}>
+                      <span style={{fontSize:12,fontWeight:600}}>{a.title}</span>
+                      {!a.read&&<span style={{width:6,height:6,borderRadius:"50%",background:col,display:"inline-block"}}/>}
+                    </div>
+                    <div style={{fontSize:11,color:"var(--muted)",lineHeight:1.5,textWrap:"pretty"}}>{a.body}</div>
+                    <div style={{fontSize:10,color:"var(--muted2)",marginTop:5}}>{a.time}</div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>}
+    </div>
+  );
+};
+
+/* ── SIDEBAR ── */
+const Sidebar=({screen,onChange,unread})=>{
+  const items=[
+    {id:"markets",icon:"⬡",label:"Markets"},
+    {id:"watchlist",icon:"★",label:"Watchlist"},
+    {id:"correlation",icon:"◉",label:"Correlation"},
+    {id:"backtest",icon:"◈",label:"Backtest"},
+    {id:"alerts",icon:"🔔",label:"Alerts",badge:unread},
+    {id:"settings",icon:"⚙",label:"Settings"},
+  ];
+  return(
+    <div style={{width:54,background:"var(--surface)",borderRight:"1px solid var(--border)",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 0",gap:4,flexShrink:0}}>
+      <div style={{marginBottom:14}}><Logo/></div>
+      {items.map((item)=>{
+        const active=screen===item.id;
+        return(
+          <div key={item.id} title={item.label} onClick={()=>onChange(item.id)}
+            style={{width:36,height:36,display:"flex",alignItems:"center",justifyContent:"center",borderRadius:8,fontSize:15,
+              background:active?"var(--green-dim)":"none",color:active?"var(--green)":"var(--muted)",cursor:"pointer",transition:"all .15s",
+              position:"relative",marginBottom:item.id==="correlation"?"auto":0}}
+            onMouseEnter={e=>{if(!active){e.currentTarget.style.background="var(--surface2)";e.currentTarget.style.color="var(--text)";}}}
+            onMouseLeave={e=>{if(!active){e.currentTarget.style.background="none";e.currentTarget.style.color="var(--muted)";}}} >
+            {item.icon}
+            {item.badge>0&&<span style={{position:"absolute",top:4,right:4,width:8,height:8,borderRadius:"50%",background:"var(--red)",border:"1.5px solid var(--bg)",animation:"pulse 2s infinite"}}/>}
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+/* ── BOTTOM NAV ── */
+const BottomNav=({screen,onChange,unread})=>(
+  <div style={{position:"fixed",bottom:0,left:0,right:0,background:"var(--surface)",borderTop:"1px solid var(--border)",display:"flex",zIndex:50,height:56}}>
+    {[{id:"markets",icon:"⬡",label:"Markets"},{id:"watchlist",icon:"★",label:"Watch"},{id:"alerts",icon:"🔔",label:"Alerts",badge:unread},{id:"settings",icon:"⚙",label:"Settings"}].map(item=>{
+      const active=screen===item.id;
+      return(<div key={item.id} onClick={()=>onChange(item.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,cursor:"pointer",color:active?"var(--green)":"var(--muted)",position:"relative"}}>
+        <span style={{fontSize:16}}>{item.icon}</span>
+        <span style={{fontSize:9,fontWeight:active?600:400}}>{item.label}</span>
+        {item.badge>0&&<span style={{position:"absolute",top:10,left:"50%",marginLeft:4,width:7,height:7,borderRadius:"50%",background:"var(--red)",border:"1.5px solid var(--bg)"}}/>}
+      </div>);
+    })}
+  </div>
+);
+
+/* ── APP ── */
+const ACCENT_COLORS={
+  mint:["oklch(0.75 0.20 155)","oklch(0.75 0.20 155 / 0.12)"],
+  cyan:["oklch(0.72 0.20 210)","oklch(0.72 0.20 210 / 0.12)"],
+  violet:["oklch(0.72 0.18 290)","oklch(0.72 0.18 290 / 0.12)"],
+};
+
+const App=()=>{
+  const [screen,setScreen]=useState("markets");
+  const [selected,setSelected]=useState(null);
+  const [showAlerts,setShowAlerts]=useState(false);
+  const [filter,setFilter]=useState("All");
+  const [search,setSearch]=useState("");
+  const [showConf,setShowConf]=useState(true);
+  const [compact,setCompact]=useState(false);
+  const [chartType,setChartType]=useState("Area");
+  const [alerts,setAlerts]=useState(ALERTS);
+  const [trackedIds,setTrackedIds]=useState(new Set([1,3,4,6]));
+  const [liveStr,setLiveStr]=useState("just now");
+  const [liveTs,setLiveTs]=useState(Date.now());
+  const [settings,setSettings]=useState(()=>{try{return{...DEFAULT_SETTINGS,...JSON.parse(localStorage.getItem("pp_settings")||"{}")}}catch{return DEFAULT_SETTINGS;}});
+  const isMobile=useIsMobile();
+  const unread=useMemo(()=>{
+    const typeKey={edge:"alertEdge",diverge:"alertDiverge",move:"alertMove",update:"alertUpdate"};
+    return alerts.filter(a=>!a.read&&settings[typeKey[a.type]]!==false).length;
+  },[alerts,settings]);
+
+  // Live ticker
+  useEffect(()=>{
+    const t=setInterval(()=>{
+      const s=Math.floor((Date.now()-liveTs)/1000);
+      setLiveStr(s<5?"just now":s<60?`${s}s ago`:"1m+ ago");
+      if(s>60){setLiveTs(Date.now());setLiveStr("just now");}
+    },1000);
+    return()=>clearInterval(t);
+  },[liveTs]);
+
+  // Theme
+  useEffect(()=>{document.body.classList.toggle("light",settings.theme==="light");},[settings.theme]);
+
+  // Accent color
+  useEffect(()=>{
+    const [c,dim]=ACCENT_COLORS[settings.accent]||ACCENT_COLORS.mint;
+    document.documentElement.style.setProperty("--green",c);
+    document.documentElement.style.setProperty("--green-dim",dim);
+  },[settings.accent]);
+
+  // Tweaks
+  useEffect(()=>{
+    const h=e=>{
+      if(e.detail?.key==="confidence") setShowConf(e.detail.val);
+      if(e.detail?.key==="compact") setCompact(e.detail.val);
+      if(e.detail?.key==="chart") setChartType(e.detail.val);
+    };
+    window.addEventListener("tweak",h);return()=>window.removeEventListener("tweak",h);
+  },[]);
+
+  // Tweaks panel protocol
+  useEffect(()=>{
+    const l=e=>{
+      if(e.data?.type==="__activate_edit_mode") document.getElementById("tweaks-panel").classList.add("visible");
+      else if(e.data?.type==="__deactivate_edit_mode") document.getElementById("tweaks-panel").classList.remove("visible");
+    };
+    window.addEventListener("message",l);
+    window.parent.postMessage({type:"__edit_mode_available"},"*");
+    return()=>window.removeEventListener("message",l);
+  },[]);
+
+  const updateSettings=useCallback((patch)=>setSettings(prev=>{
+    const next={...prev,...patch};
+    try{localStorage.setItem("pp_settings",JSON.stringify(next));}catch{}
+    return next;
+  }),[]);
+
+  const markRead=useCallback((id)=>setAlerts(prev=>id==null?prev.map(a=>({...a,read:true})):prev.map(a=>a.id===id?{...a,read:true}:a)),[]);
+
+  const trackMarket=useCallback((id)=>setTrackedIds(prev=>{
+    const next=new Set(prev);
+    next.has(id)?next.delete(id):next.add(id);
+    return next;
+  }),[]);
+
+  const handleNav=(id)=>{
+    if(id==="alerts"){setShowAlerts(true);setSelected(null);}
+    else{setShowAlerts(false);setScreen(id);setSelected(null);}
+  };
+
+  const catMap={BTC:"BTC",ETH:"ETH",SOL:"SOL",Macro:"MACRO",Equities:"COIN"};
+  const filtered=useMemo(()=>{
+    let ms=filter==="All"?MARKETS:MARKETS.filter(m=>m.category===(catMap[filter]||filter));
+    if(search.trim().length>=2) ms=ms.filter(m=>m.question.toLowerCase().includes(search.toLowerCase())||m.category.toLowerCase().includes(search.toLowerCase()));
+    return ms;
+  },[filter,search]);
+
+  const screenTitle={markets:"Markets",watchlist:"Watchlist",correlation:"Correlation",backtest:"Backtest",settings:"Settings"};
+  const screenSub={markets:`Crypto & Finance · ${MARKETS.length} tracked`,watchlist:"Your tracked positions",correlation:"Signal alignment across markets",backtest:"Historical accuracy · last 90 days",settings:"Preferences & configuration"};
+
+  const summaryStats=[
+    {label:"Strong edges",val:MARKETS.filter(m=>Math.abs(m.estimate-m.market)>=8).length,col:"var(--green)"},
+    {label:"Avg confidence",val:"72%",col:"var(--violet)"},
+    {label:"Signals active",val:"6/6",col:"var(--amber)"},
+  ];
+
+  return(
+    <div style={{display:"flex",width:"100%",height:"100dvh",overflow:"hidden"}}>
+      {!isMobile&&<Sidebar screen={screen} onChange={handleNav} unread={unread}/>}
+      <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",paddingBottom:isMobile?56:0}}>
+        {/* topbar */}
+        <div style={{padding:"13px 20px",borderBottom:"1px solid var(--border)",display:"flex",alignItems:"center",gap:12,flexShrink:0}}>
+          {isMobile&&<Logo/>}
+          <div style={{flex:1}}>
+            <div style={{fontSize:15,fontWeight:700}}>{screenTitle[screen]||"Markets"}</div>
+            <div style={{fontSize:11,color:"var(--muted)"}}>{screenSub[screen]||""}</div>
+          </div>
+          {/* search */}
+          {(screen==="markets"||screen==="watchlist")&&(
+            <div style={{display:"flex",alignItems:"center",gap:8,background:"var(--surface)",border:"1px solid var(--border)",borderRadius:8,padding:"5px 11px",width:isMobile?130:200}}>
+              <span style={{color:"var(--muted)",fontSize:12}}>⌕</span>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search markets…"
+                style={{background:"none",border:"none",outline:"none",color:"var(--text)",fontSize:12,fontFamily:"inherit",width:"100%"}}/>
+              {search&&<span onClick={()=>setSearch("")} style={{cursor:"pointer",color:"var(--muted)",fontSize:14,lineHeight:1}}>×</span>}
+            </div>
+          )}
+          {isMobile&&(
+            <div style={{position:"relative",cursor:"pointer"}} onClick={()=>setShowAlerts(v=>!v)}>
+              <span style={{fontSize:18}}>🔔</span>
+              {unread>0&&<span style={{position:"absolute",top:-2,right:-2,width:8,height:8,borderRadius:"50%",background:"var(--red)",border:"1.5px solid var(--bg)"}}/>}
+            </div>
+          )}
+          {!isMobile&&screen==="markets"&&(
+            <div style={{padding:"5px 12px",borderRadius:8,background:"var(--green-dim)",border:"1px solid var(--green)",color:"var(--green)",fontSize:12,fontWeight:600,cursor:"pointer"}}>+ Add market</div>
+          )}
+        </div>
+
+        {/* screen content */}
+        {screen==="watchlist"
+          ?<WatchlistScreen onSelect={m=>{setSelected(m);setShowAlerts(false);}} trackedIds={trackedIds}/>
+          :screen==="correlation"?<CorrelationScreen/>
+          :screen==="backtest"?<BacktestScreen/>
+          :screen==="settings"?<SettingsScreen settings={settings} onUpdate={updateSettings}/>
+          :(
+          <div style={{flex:1,overflowY:"auto",padding:"16px 20px"}}>
+            <FilterTabs active={filter} onChange={setFilter} liveStr={liveStr}/>
+            <div style={{display:"grid",gridTemplateColumns:`repeat(${isMobile?1:3},1fr)`,gap:10,marginBottom:16}}>
+              {summaryStats.map((s,i)=>(
+                <div key={i} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:8,padding:"11px 14px"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",fontWeight:700,textTransform:"uppercase",letterSpacing:".08em",marginBottom:4}}>{s.label}</div>
+                  <div style={{fontFamily:"'JetBrains Mono'",fontSize:20,fontWeight:600,color:s.col}}>{s.val}</div>
+                </div>
+              ))}
+            </div>
+            {filtered.length===0
+              ?<EmptyState icon="⌕" title="No markets found" sub={`No results for "${search}". Try a different keyword or clear the filter.`}/>
+              :<div style={{display:"flex",flexDirection:"column",gap:9}}>
+                {filtered.map(m=>(
+                  <MarketCard key={m.id} market={m} active={selected?.id===m.id} compact={compact} search={search}
+                    onClick={()=>{setSelected(selected?.id===m.id?null:m);setShowAlerts(false);}}/>
+                ))}
+              </div>}
+            <div style={{height:20}}/>
+          </div>
+        )}
+      </div>
+
+      {isMobile&&<BottomNav screen={screen} onChange={handleNav} unread={unread}/>}
+
+      {selected&&!showAlerts&&(
+        <DetailPanel market={selected} onClose={()=>setSelected(null)} showConf={showConf}
+          isMobile={isMobile} chartType={chartType} defaultBankroll={settings.bankroll}
+          tracked={trackedIds.has(selected.id)} onTrack={trackMarket}/>
+      )}
+      {showAlerts&&(
+        <AlertsDrawer alerts={alerts} onRead={markRead} settings={settings}
+          onSelectMarket={m=>{setSelected(m);setShowAlerts(false);}}/>
+      )}
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>

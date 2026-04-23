@@ -15,6 +15,8 @@ members = [
 [tool.uv.sources]
 polymarket-client = { workspace = true }
 polypredictor-model = { workspace = true }
+polypredictor-api = { workspace = true }
+polypredictor-ingest = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -66,5 +68,12 @@ asyncio_mode = "auto"
 [dependency-groups]
 dev = [
     "mypy>=1.20.2",
+    "polymarket-client",
+    "polypredictor-api",
+    "polypredictor-ingest",
+    "polypredictor-model",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
     "ruff>=0.15.11",
 ]

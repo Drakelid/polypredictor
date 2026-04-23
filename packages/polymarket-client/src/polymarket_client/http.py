@@ -103,6 +103,7 @@ class HttpTransport:
         headers: dict[str, str] | None = None,
         ttl_s: float | None = None,
         bypass_cache: bool = False,
+        conditional_cache: bool = False,
     ) -> Any:
         """GET with rate limiting, caching and typed errors.
 
@@ -110,29 +111,39 @@ class HttpTransport:
         ``ttl_s`` overrides the default cache TTL per-endpoint.
         """
         cache_key = make_cache_key(self.base_url, path, params)
-        if not bypass_cache:
-            cached = await self.cache.get(cache_key)
-            if cached is not None:
-                await self._emit_health(
-                    RequestHealth(
-                        base_url=self.base_url,
-                        endpoint=path,
-                        http_status=200,
-                        latency_ms=0,
-                        cache_hit=True,
-                    )
+        cached_entry = await self.cache.get_entry(cache_key, allow_stale=conditional_cache)
+        if cached_entry is not None and not self.cache.is_expired(cached_entry) and not bypass_cache:
+            await self._emit_health(
+                RequestHealth(
+                    base_url=self.base_url,
+                    endpoint=path,
+                    http_status=200,
+                    latency_ms=0,
+                    cache_hit=True,
                 )
-                return cached
+            )
+            return cached_entry.value
 
         bucket = self._pick_bucket(endpoint_class)
         await bucket.acquire(1.0)
 
         effective_ttl = ttl_s if ttl_s is not None else self.default_ttl_s
         last_exc: Exception | None = None
+        request_headers = dict(headers or {})
+        if (
+            conditional_cache
+            and not bypass_cache
+            and cached_entry is not None
+            and self.cache.is_expired(cached_entry)
+        ):
+            if cached_entry.etag:
+                request_headers.setdefault("If-None-Match", cached_entry.etag)
+            if cached_entry.last_modified:
+                request_headers.setdefault("If-Modified-Since", cached_entry.last_modified)
         for attempt in range(self.max_retries + 1):
             started = time.perf_counter()
             try:
-                resp = await self._client.get(path, params=params, headers=headers)
+                resp = await self._client.get(path, params=params, headers=request_headers or None)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_exc = exc
                 await self._emit_health(
@@ -153,8 +164,14 @@ class HttpTransport:
             latency_ms = int((time.perf_counter() - started) * 1000)
             if resp.status_code == 200:
                 data = resp.json()
-                if not bypass_cache and effective_ttl > 0:
-                    await self.cache.set(cache_key, data, ttl_s=effective_ttl)
+                if not bypass_cache and effective_ttl >= 0:
+                    await self.cache.set(
+                        cache_key,
+                        data,
+                        ttl_s=effective_ttl,
+                        etag=resp.headers.get("etag"),
+                        last_modified=resp.headers.get("last-modified"),
+                    )
                 await self._emit_health(
                     RequestHealth(
                         base_url=self.base_url,
@@ -165,6 +182,19 @@ class HttpTransport:
                     )
                 )
                 return data
+
+            if resp.status_code == 304 and cached_entry is not None:
+                await self.cache.refresh(cache_key, ttl_s=effective_ttl)
+                await self._emit_health(
+                    RequestHealth(
+                        base_url=self.base_url,
+                        endpoint=path,
+                        http_status=304,
+                        latency_ms=latency_ms,
+                        cache_hit=True,
+                    )
+                )
+                return cached_entry.value
 
             await self._emit_health(
                 RequestHealth(
