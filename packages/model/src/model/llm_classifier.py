@@ -1,103 +1,189 @@
-"""LLM-assisted market-type classifier with human-review queue.
+"""LLM-assisted market-type classifier with pluggable review queue.
 
-This module provides a thin wrapper around the deterministic
-`classify` function defined in :mod:`classifier`. It preserves the
-existing heuristics for obvious cases, and for low-confidence or
-``MISC`` classifications it enqueues the market for human review and
-returns the original classification result. The intention is that
-future releases will integrate an actual LLM call here to provide
-better coverage on ambiguous markets. For now the implementation is
-explicit about deferring to human judgment and surfaces a reason
-explaining why the LLM stub was invoked.
+The deterministic rules in :mod:`model.classifier` are high-precision but
+flag low-confidence / MISC outputs via :attr:`ClassificationResult.needs_review`.
+This module wraps that classifier so an operator can:
+
+1. Optionally pre-fill an LLM-suggested market_type for ambiguous cases.
+   The :class:`LlmCallable` Protocol keeps the model package free of any
+   LLM SDK dependency — operators wire Anthropic / OpenAI / local models
+   from the API layer at request time.
+2. Optionally route ambiguous markets into a persistent review queue. The
+   :class:`QueueWriter` Protocol decouples the queue implementation; the
+   API service uses :func:`api.classification_review.enqueue_for_review`
+   in production.
+
+Both extension points are optional. With neither configured, the function
+collapses to the underlying deterministic classifier — no side effects,
+no global state. The previously-exported in-memory ``HUMAN_REVIEW_QUEUE``
+list is retained for backwards compatibility but is no longer the canonical
+queue (it's now a documented test-only helper).
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from .classifier import classify, ClassificationResult
+from .classifier import ClassificationResult, classify
+from .types import MarketType
 
 
-# In-memory queue of markets requiring human review.  In a real system
-# this might be a database table or message queue.  For the purposes
-# of the stub it is simply a list of dictionaries capturing the
-# original classification inputs and result.
-HUMAN_REVIEW_QUEUE: List[Dict[str, Any]] = []
+# Public for backwards compatibility — kept as an in-memory test sink. Real
+# enqueueing goes through the QueueWriter protocol.
+HUMAN_REVIEW_QUEUE: list[dict[str, Any]] = []
+
+
+@dataclass(frozen=True)
+class LlmSuggestion:
+    market_type: MarketType
+    confidence: float
+    rationale: str
+
+
+# Operator-pluggable LLM call. Must return None when no suggestion is
+# available (rate-limited, low confidence, etc.); the caller treats None
+# as "fall back to deterministic result".
+LlmCallable = Callable[[ClassificationResult, dict[str, Any]], LlmSuggestion | None]
+
+
+# Queue writer side effect. The API service implements this via
+# api.classification_review.enqueue_for_review; tests can supply a fake.
+QueueWriter = Callable[[dict[str, Any]], Awaitable[str | None]]
 
 
 def classify_with_llm(
     *,
     question: str,
-    description: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    resolution_source: Optional[str] = None,
-    end_date: Optional[datetime] = None,
-    outcomes: Optional[List[str]] = None,
+    description: str | None = None,
+    tags: Sequence[str] | None = None,
+    resolution_source: str | None = None,
+    end_date: datetime | None = None,
+    outcomes: Sequence[str] | None = None,
     multi_outcome_sibling_count: int = 0,
+    llm_callable: LlmCallable | None = None,
+    record_in_test_sink: bool = False,
 ) -> ClassificationResult:
-    """Classify a market using deterministic rules and invoke an LLM stub when ambiguous.
+    """Classify a market and refine ambiguous cases via an optional LLM.
 
-    The function first delegates to :func:`classifier.classify`.  If the
-    resulting classification is confident enough (confidence >= 0.55 and
-    market_type is not ``MISC``) it returns the result unchanged.  When
-    the classifier is uncertain or falls back to ``MISC`` the market
-    inputs and preliminary result are added to the :data:`HUMAN_REVIEW_QUEUE`
-    and the returned result gains an additional reason noting that an
-    LLM-assisted review has been requested.
+    Steps:
+      1. Run the deterministic classifier.
+      2. Return immediately when the result is confident (``not needs_review``).
+      3. If ``llm_callable`` is provided, ask it for a suggestion. When the
+         suggestion's confidence beats the deterministic confidence, return
+         a refined :class:`ClassificationResult` carrying the LLM's market
+         type plus a reason recording the LLM provenance.
+      4. Otherwise return the deterministic result, augmented with a reason
+         documenting that the LLM was unavailable / declined.
 
-    Parameters mirror those of the underlying :func:`classifier.classify`.
+    The function is pure and side-effect-free unless ``record_in_test_sink``
+    is set, in which case the inputs and preliminary result are appended to
+    :data:`HUMAN_REVIEW_QUEUE` so unit tests can introspect the queue.
+    Persistent queueing is the API service's responsibility.
     """
-    result = classify(
+    deterministic = classify(
         question=question,
         description=description,
-        tags=tags,
+        tags=list(tags) if tags is not None else None,
         resolution_source=resolution_source,
         end_date=end_date,
-        outcomes=outcomes,
+        outcomes=list(outcomes) if outcomes is not None else None,
         multi_outcome_sibling_count=multi_outcome_sibling_count,
     )
 
-    # If the deterministic classifier is confident and not misc, return immediately.
-    if not result.needs_review:
-        return result
+    if not deterministic.needs_review:
+        return deterministic
 
-    # Otherwise, enqueue for human review.  Record the inputs and the
-    # preliminary classification to allow manual triage later.  A real
-    # implementation might also trigger an asynchronous LLM call here to
-    # refine the result before human intervention.
-    HUMAN_REVIEW_QUEUE.append(
-        {
-            "question": question,
-            "description": description,
-            "tags": tags,
-            "resolution_source": resolution_source,
-            "end_date": end_date,
-            "outcomes": outcomes,
-            "multi_outcome_sibling_count": multi_outcome_sibling_count,
-            "preliminary_result": result,
-        }
+    inputs = {
+        "question": question,
+        "description": description,
+        "tags": list(tags) if tags is not None else None,
+        "resolution_source": resolution_source,
+        "end_date": end_date,
+        "outcomes": list(outcomes) if outcomes is not None else None,
+        "multi_outcome_sibling_count": multi_outcome_sibling_count,
+        "preliminary_result": deterministic,
+    }
+
+    if record_in_test_sink:
+        HUMAN_REVIEW_QUEUE.append(inputs)
+
+    if llm_callable is None:
+        return _augment_reasons(
+            deterministic,
+            ["LLM not configured; deterministic classification flagged for human review"],
+        )
+
+    try:
+        suggestion = llm_callable(deterministic, inputs)
+    except Exception as exc:  # noqa: BLE001 — operator's callable owns its own retries
+        return _augment_reasons(
+            deterministic,
+            [f"LLM callable raised {exc.__class__.__name__}; falling back to deterministic"],
+        )
+
+    if suggestion is None:
+        return _augment_reasons(
+            deterministic,
+            ["LLM declined to refine; preserving deterministic result"],
+        )
+
+    if suggestion.confidence <= deterministic.confidence:
+        return _augment_reasons(
+            deterministic,
+            [
+                f"LLM suggested {suggestion.market_type.value} at {suggestion.confidence:.2f} "
+                f"but did not beat deterministic confidence {deterministic.confidence:.2f}"
+            ],
+        )
+
+    return ClassificationResult(
+        market_type=suggestion.market_type,
+        confidence=suggestion.confidence,
+        features=deterministic.features,
+        reasons=[
+            *deterministic.reasons,
+            f"LLM refinement: {suggestion.market_type.value} "
+            f"(confidence {suggestion.confidence:.2f}). {suggestion.rationale}",
+        ],
     )
 
-    # Augment the reasons to indicate that the LLM stub was invoked.  We do
-    # not modify the market_type so downstream code remains consistent.
-    augmented_reasons = list(result.reasons)
-    augmented_reasons.append("LLM stub invoked — queued for human review")
 
+def _augment_reasons(
+    result: ClassificationResult, extra: Sequence[str]
+) -> ClassificationResult:
     return ClassificationResult(
         market_type=result.market_type,
         confidence=result.confidence,
         features=result.features,
-        reasons=augmented_reasons,
+        reasons=[*result.reasons, *extra],
     )
 
 
-def get_review_queue() -> List[Dict[str, Any]]:
-    """Return a copy of the current human review queue.
+def get_review_queue() -> list[dict[str, Any]]:
+    """Return a copy of the in-memory test sink.
 
-    Exposing a copy rather than the underlying list prevents callers
-    from mutating the queue outside of this module.  In a production
-    implementation this accessor would instead issue a database query or
-    consume from a message queue.
+    The persistent queue lives in Postgres; use
+    :func:`api.classification_review.list_pending_reviews` for the
+    production view. This helper exists to keep legacy callers (test
+    harnesses) compiling.
     """
-    return HUMAN_REVIEW_QUEUE.copy()
+    return list(HUMAN_REVIEW_QUEUE)
+
+
+def reset_review_queue() -> None:
+    """Clear the in-memory test sink."""
+    HUMAN_REVIEW_QUEUE.clear()
+
+
+__all__ = [
+    "HUMAN_REVIEW_QUEUE",
+    "LlmCallable",
+    "LlmSuggestion",
+    "QueueWriter",
+    "classify_with_llm",
+    "get_review_queue",
+    "reset_review_queue",
+]

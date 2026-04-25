@@ -12,7 +12,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import asof as asof_q
+from . import auth as auth_q
 from . import backtest_report as backtest_report_q
+from . import classification_review as classification_review_q
 from . import beta_onboarding as beta_onboarding_q
 from . import clob_credentials as clob_credentials_q
 from . import concentration as concentration_q
@@ -29,6 +31,7 @@ from . import markets as markets_q
 from . import model_admin as model_admin_q
 from . import onchain_metrics as onchain_metrics_q
 from . import polymarket_account as polymarket_account_q
+from . import privacy_audit as privacy_audit_q
 from . import privacy_prefs as privacy_prefs_q
 from . import push_prefs as push_prefs_q
 from . import regime as regime_q
@@ -73,6 +76,13 @@ def get_pg() -> Any:
     return app.state.pg
 
 
+# Wire the auth router's pool dependency to this app's pool. The router
+# stays decoupled from main; we register the override here so a single
+# place owns the wiring.
+app.dependency_overrides[auth_q.get_pool_dependency] = get_pg
+app.include_router(auth_q.router)
+
+
 class JournalCallCreateRequest(BaseModel):
     condition_id: str
     outcome: str = Field(pattern="^(YES|NO)$")
@@ -95,6 +105,11 @@ class PrivacyPreferencesRequest(BaseModel):
 
 class ModelDisableTransitionRequest(BaseModel):
     reason: str | None = None
+
+
+class ClassificationReviewDecisionRequest(BaseModel):
+    decision: str = Field(pattern="^(accepted|rejected)$")
+    notes: str | None = None
 
 
 class ClobCredentialRequest(BaseModel):
@@ -1089,6 +1104,22 @@ async def privacy_dp_aggregates(
     }
 
 
+@app.get("/v1/privacy/audit")
+async def privacy_audit_feed(
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Verify the cross-user privacy invariants from data alone.
+
+    Two checks: (1) every persisted DP aggregate row's keys are a subset of
+    the explicitly-allowed columns (no user_id leak), and (2) every row
+    clears its declared k-anonymity floor (source_user_count >= min_users,
+    raw_call_count >= min_calls). Surfaces only counts; no row payloads.
+    """
+    asked_at = datetime.now(tz=UTC)
+    report = await privacy_audit_q.run_privacy_audit(pool=pg, asked_at=asked_at)
+    return privacy_audit_q.report_to_dict(report)
+
+
 @app.put("/v1/privacy-preferences")
 async def update_privacy_preferences(
     payload: PrivacyPreferencesRequest,
@@ -1539,6 +1570,64 @@ async def update_tuning_profile(
         "log_odds_shifts": profile.log_odds_shifts,
         "is_active": profile.is_active,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+@app.get("/v1/admin/classification-review")
+async def admin_classification_review_list(
+    limit: int = Query(50, ge=1, le=500),
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """List pending market-classification reviews oldest-first."""
+    rows = await classification_review_q.list_pending_reviews(pool=pg, limit=limit)
+    return {
+        "count": len(rows),
+        "rows": [
+            {
+                "id": row.id,
+                "condition_id": row.condition_id,
+                "question": row.question,
+                "description": row.description,
+                "tags": row.tags,
+                "resolution_source": row.resolution_source,
+                "end_date": row.end_date.isoformat() if row.end_date else None,
+                "multi_outcome_sibling_count": row.multi_outcome_sibling_count,
+                "preliminary_market_type": row.preliminary_market_type,
+                "preliminary_confidence": row.preliminary_confidence,
+                "preliminary_reasons": row.preliminary_reasons,
+                "llm_market_type": row.llm_market_type,
+                "llm_confidence": row.llm_confidence,
+                "llm_rationale": row.llm_rationale,
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.post("/v1/admin/classification-review/{review_id}")
+async def admin_classification_review_decide(
+    review_id: str,
+    payload: ClassificationReviewDecisionRequest,
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Record a human decision against a pending classification review."""
+    try:
+        decision = await classification_review_q.submit_review(
+            pool=pg,
+            review_id=review_id,
+            decision=payload.decision,
+            reviewer_notes=payload.notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": decision.id,
+        "condition_id": decision.condition_id,
+        "status": decision.status,
+        "reviewer_decision": decision.reviewer_decision,
+        "reviewer_notes": decision.reviewer_notes,
+        "reviewed_at": decision.reviewed_at.isoformat(),
     }
 
 

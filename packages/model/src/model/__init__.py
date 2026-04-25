@@ -42,7 +42,13 @@ from .baselines import (
     range_baseline,
     threshold_baseline,
 )
-from .changelog_watch import is_newer_version
+from .changelog_watch import (
+    ShapeDiff,
+    compare_response_shape,
+    diff_shapes,
+    is_newer_version,
+    response_shape_hash,
+)
 from .classifier import ClassificationResult, MarketFeatures, classify
 from .conformal import (
     ConformalCell,
@@ -94,7 +100,15 @@ from .headline_classifier import HeadlineClassificationResult, classify_headline
 from .journal_utils import JournalCall, compute_call_brier, compute_pnl
 from .kol_lists import filter_posts_by_category, get_kols_for_category
 from .liquidity import is_thin_book
-from .llm_classifier import HUMAN_REVIEW_QUEUE, classify_with_llm
+from .llm_classifier import (
+    HUMAN_REVIEW_QUEUE,
+    LlmCallable,
+    LlmSuggestion,
+    QueueWriter,
+    classify_with_llm,
+    get_review_queue,
+    reset_review_queue,
+)
 from .metrics import brier_score, conformal_coverage, mean_brier_score
 from .paper_trading import enable_paper_trading, is_paper_trading_enabled
 from .pipeline import PipelineResult, probability_for_market
@@ -141,6 +155,8 @@ __all__ = [
     "BOOSTER_FEATURE_NAMES",
     "HUMAN_REVIEW_QUEUE",
     "LINEAR_FEATURE_NAMES",
+    "LlmCallable",
+    "LlmSuggestion",
     "ROLLING_WINDOWS_DEFAULT",
     "TTR_BUCKETS_DEFAULT",
     "ArbViolation",
@@ -179,12 +195,14 @@ __all__ = [
     "PipelineResult",
     "PredictionExplanation",
     "PurgedFold",
+    "QueueWriter",
     "RegimeFeatures",
     "RegimeLabel",
     "RegimeResult",
     "RegimeThresholds",
     "ResolutionRiskResult",
     "RollingWindowReport",
+    "ShapeDiff",
     "SiblingMarket",
     "SiblingPrior",
     "SiblingQuote",
@@ -205,12 +223,14 @@ __all__ = [
     "classify",
     "classify_headline",
     "classify_with_llm",
+    "compare_response_shape",
     "compute_call_brier",
     "compute_pnl",
     "conformal_coverage",
     "credibility_weight",
     "detect_multi_outcome_arbs",
     "detect_threshold_arbs",
+    "diff_shapes",
     "discrete_event_baseline",
     "distribution_to_probability",
     "enable_paper_trading",
@@ -224,6 +244,7 @@ __all__ = [
     "fit_split_conformal",
     "fit_split_conformal_from_folds",
     "get_kols_for_category",
+    "get_review_queue",
     "is_actionable",
     "is_newer_version",
     "is_paper_trading_enabled",
@@ -250,6 +271,8 @@ __all__ = [
     "reach_adjusted_volume",
     "records_contain_only_allowed_fields",
     "regime_features_from_btc_closes",
+    "reset_review_queue",
+    "response_shape_hash",
     "rolling_window_reports",
     "score_resolution_risk",
     "select_actionable_events",

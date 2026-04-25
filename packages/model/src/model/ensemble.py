@@ -134,9 +134,33 @@ class GradientBoostStump:
     threshold: float
     left_value: float
     right_value: float
+    # Fraction of training samples that fell into the left leaf at fit time.
+    # Persisted so :meth:`shap_contribution` can subtract the training-set
+    # expectation per stump, turning the additive contribution into a true
+    # SHAP value (f(x) - E[f(X)] decomposes additively across stumps for
+    # an additive booster). Legacy registries written before this field
+    # default to 0.5 — SHAP is then approximated under the balanced-data
+    # assumption rather than computed exactly.
+    left_fraction: float = 0.5
 
     def contribution(self, value: float) -> float:
         return self.left_value if value <= self.threshold else self.right_value
+
+    @property
+    def expected_contribution(self) -> float:
+        return (
+            self.left_fraction * self.left_value
+            + (1.0 - self.left_fraction) * self.right_value
+        )
+
+    def shap_contribution(self, value: float) -> float:
+        """Per-sample SHAP value for this stump.
+
+        For an additive model with independent stumps, the SHAP value
+        collapses to ``contribution(x) - E_X[contribution(X)]``. Per-stump
+        SHAP values then sum to ``f(x) - E[f(X)]`` across the booster.
+        """
+        return self.contribution(value) - self.expected_contribution
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -144,6 +168,7 @@ class GradientBoostStump:
             "threshold": self.threshold,
             "left_value": self.left_value,
             "right_value": self.right_value,
+            "left_fraction": self.left_fraction,
         }
 
     @classmethod
@@ -153,6 +178,7 @@ class GradientBoostStump:
             threshold=float(payload["threshold"]),
             left_value=float(payload["left_value"]),
             right_value=float(payload["right_value"]),
+            left_fraction=float(payload.get("left_fraction", 0.5)),
         )
 
 
@@ -263,13 +289,33 @@ class TypeEnsembleModel:
         return self.calibrator.predict(raw)
 
     def explain_prediction(self, sample: EnsembleSample) -> PredictionExplanation:
+        return self._explain(sample, shap=False)
+
+    def explain_prediction_shap(self, sample: EnsembleSample) -> PredictionExplanation:
+        """Per-feature SHAP-style explanation.
+
+        Linear features are already mean-centered (the ``_scaled_value``
+        normalization subtracts the training mean), so their contributions
+        equal their SHAP values out of the box. Booster stumps are
+        additive and independent, so the stump-level SHAP value is
+        ``contribution(x) - E_X[contribution(X)]`` — computed against the
+        ``left_fraction`` recorded at fit time. Per-feature SHAP values
+        then sum to ``raw_score - E[raw_score]`` (intercept + sum of
+        expected stump contributions).
+        """
+        return self._explain(sample, shap=True)
+
+    def _explain(self, sample: EnsembleSample, *, shap: bool) -> PredictionExplanation:
         score = self.linear_intercept
+        intercept_contribution = (
+            0.0 if shap else self.linear_intercept
+        )
         contributions = [
             FeatureContribution(
                 feature_name="intercept",
                 feature_value=None,
                 transformed_value=1.0,
-                score_contribution=self.linear_intercept,
+                score_contribution=intercept_contribution,
             )
         ]
         for feature_name in LINEAR_FEATURE_NAMES:
@@ -280,14 +326,16 @@ class TypeEnsembleModel:
                 scales=self.linear_scales,
             )
             weight = self.linear_weights.get(feature_name, 0.0)
-            contribution = weight * transformed_value
-            score += contribution
+            raw_contribution = weight * transformed_value
+            score += raw_contribution
+            # Linear contributions are already mean-zero — SHAP value
+            # equals the raw contribution for both modes.
             contributions.append(
                 FeatureContribution(
                     feature_name=feature_name,
                     feature_value=_feature_value(sample, feature_name),
                     transformed_value=transformed_value,
-                    score_contribution=contribution,
+                    score_contribution=raw_contribution,
                 )
             )
         for stump in self.stumps:
@@ -297,14 +345,17 @@ class TypeEnsembleModel:
                 means=self.booster_means,
                 scales=self.booster_scales,
             )
-            contribution = stump.contribution(transformed_value)
-            score += contribution
+            raw_contribution = stump.contribution(transformed_value)
+            score += raw_contribution
+            reported = (
+                stump.shap_contribution(transformed_value) if shap else raw_contribution
+            )
             contributions.append(
                 FeatureContribution(
                     feature_name=stump.feature_name,
                     feature_value=_feature_value(sample, stump.feature_name),
                     transformed_value=transformed_value,
-                    score_contribution=contribution,
+                    score_contribution=reported,
                 )
             )
         raw_probability = float(expit(score))
@@ -381,6 +432,14 @@ class EnsembleRegistry:
         if model is None:
             return None
         return model.explain_prediction(sample)
+
+    def explain_prediction_shap(
+        self, sample: EnsembleSample
+    ) -> PredictionExplanation | None:
+        model = self.model_for_type(sample.market_type)
+        if model is None:
+            return None
+        return model.explain_prediction_shap(sample)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -579,6 +638,7 @@ def _fit_best_stump(
     best_threshold = 0.0
     best_left = 0.0
     best_right = 0.0
+    best_left_fraction = 0.5
     best_error: float | None = None
 
     for feature_idx, feature_name in enumerate(feature_names):
@@ -590,7 +650,9 @@ def _fit_best_stump(
         for threshold in thresholds:
             left_mask = values <= threshold
             right_mask = ~left_mask
-            if int(np.sum(left_mask)) < min_samples_leaf or int(np.sum(right_mask)) < min_samples_leaf:
+            n_left = int(np.sum(left_mask))
+            n_right = int(np.sum(right_mask))
+            if n_left < min_samples_leaf or n_right < min_samples_leaf:
                 continue
             left_value = float(np.mean(residual[left_mask]))
             right_value = float(np.mean(residual[right_mask]))
@@ -603,6 +665,7 @@ def _fit_best_stump(
             best_threshold = float(threshold)
             best_left = left_value * learning_rate
             best_right = right_value * learning_rate
+            best_left_fraction = n_left / float(n_left + n_right)
 
     if best_feature is None:
         return None
@@ -613,6 +676,7 @@ def _fit_best_stump(
         threshold=best_threshold,
         left_value=best_left,
         right_value=best_right,
+        left_fraction=best_left_fraction,
     )
 
 

@@ -1339,7 +1339,13 @@ def _feature_attributions_for_sample(
 ) -> tuple[list[str], list[dict[str, object]]]:
     if registry is None or sample is None or model_source != "ensemble":
         return [], []
-    explanation = registry.explain_prediction(sample)
+    # Prefer the SHAP-style explanation so the "Why not the market's price?"
+    # panel and the top-3 drivers show contributions vs. the training-set
+    # average (additive SHAP), not raw vs. zero — the former is what the
+    # PRD §6.5 calls for. Falls back to the raw path on any registry error.
+    explanation = registry.explain_prediction_shap(sample)
+    if explanation is None:
+        explanation = registry.explain_prediction(sample)
     if explanation is None:
         return [], []
     ranked = [

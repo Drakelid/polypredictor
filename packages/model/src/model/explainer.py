@@ -1,68 +1,61 @@
-"""Simple explanation utilities for per-prediction feature attribution.
+"""Per-prediction SHAP utilities.
 
-This module provides lightweight, dependency-free helper functions to
-approximate SHAP-like values for a given model and input sample. In
-production the ensemble models shipped with PolyPredictor expose an
-``explain_prediction`` method (see ``packages/model/src/model/ensemble.py``)
-that returns a ``PredictionExplanation`` containing per-feature
-contributions. Rather than pulling in the heavy SHAP library or
-duplicating logic, these helpers simply delegate to that method when
-available.
+The PolyPredictor ensemble (``packages/model/src/model/ensemble.py``) is
+additive: a bounded linear logit stack plus a sum of independent gradient
+boost stumps. For additive models the per-feature SHAP value collapses
+to ``contribution(x) - E_X[contribution(X)]``; the linear stack is
+already mean-centered (so its raw contribution equals its SHAP value)
+and each stump records the training-set ``left_fraction`` it was fit on
+so its expected contribution is computable at serve time.
 
-The returned values are **not** mathematically identical to formal
-SHAP values; they are deterministic contributions from the linear
-stack and boosted stumps used in the ensemble. For the purposes of
-the dashboard and API, these contributions provide intuitive insight
-into which features drove the model’s probability on a single market.
-Future milestones may replace these stubs with true SHAP extraction.
+These helpers prefer the model's :meth:`explain_prediction_shap` when
+available (true additive SHAP) and fall back to ``explain_prediction``
+for legacy callers that just want raw contributions.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 
-def extract_shap_values(sample: Any, model: Any) -> Dict[str, float]:
-    """Return per-feature contribution values for a single prediction.
+def extract_shap_values(sample: Any, model: Any) -> dict[str, float]:
+    """Return per-feature SHAP contributions for a single prediction.
 
-    This function is a thin wrapper around a model’s ``explain_prediction``
-    method. If the given ``model`` implements an ``explain_prediction``
-    method that accepts ``sample`` and returns an object with a
-    ``contributions`` attribute (iterable of objects with ``feature_name``
-    and ``score_contribution`` attributes), the contributions are
-    converted into a ``dict`` keyed by feature name. Otherwise an empty
-    dictionary is returned.
+    Prefers the model's :meth:`explain_prediction_shap` (additive SHAP via
+    per-stump training-fraction memory — see
+    :class:`model.ensemble.GradientBoostStump`) when available; falls back
+    to :meth:`explain_prediction` for legacy or non-additive models that
+    only expose raw contributions.
 
     Parameters
     ----------
     sample: Any
-        The model input on which to compute contributions. In PolyPredictor
-        this will typically be an instance of ``EnsembleSample`` but any
-        object is accepted as this stub does not enforce a strict type.
+        The model input on which to compute contributions. Typically an
+        :class:`EnsembleSample` but any object the model accepts is fine.
     model: Any
-        A model object that may implement ``explain_prediction(sample)``.
+        A model exposing ``explain_prediction_shap`` and/or
+        ``explain_prediction``.
 
     Returns
     -------
     Dict[str, float]
-        A mapping from feature names to their raw score contributions. If
-        no contributions are available an empty dict is returned.
+        Feature name to SHAP value mapping. Empty when neither method
+        produces a useful explanation.
     """
-    # Delegate to a model-specific explanation method when available
-    explain_fn = getattr(model, "explain_prediction", None)
+    explain_fn = getattr(model, "explain_prediction_shap", None) or getattr(
+        model, "explain_prediction", None
+    )
     if explain_fn is None:
         return {}
     try:
         explanation = explain_fn(sample)  # type: ignore[call-arg]
     except Exception:
-        # Best effort: if the model throws, return no values
         return {}
     contributions = getattr(explanation, "contributions", None)
     if contributions is None:
         return {}
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for item in contributions:
-        # Each item should have feature_name and score_contribution attributes
         name = getattr(item, "feature_name", None)
         contribution = getattr(item, "score_contribution", None)
         if isinstance(name, str) and isinstance(contribution, (int, float)):
@@ -70,7 +63,7 @@ def extract_shap_values(sample: Any, model: Any) -> Dict[str, float]:
     return out
 
 
-def top_n_drivers(sample: Any, model: Any, n: int = 3) -> List[Tuple[str, float]]:
+def top_n_drivers(sample: Any, model: Any, n: int = 3) -> list[tuple[str, float]]:
     """Return the top ``n`` features ranked by absolute contribution.
 
     This helper sorts the contributions returned by
@@ -104,7 +97,7 @@ def top_n_drivers(sample: Any, model: Any, n: int = 3) -> List[Tuple[str, float]
     return sorted_items[:n]
 
 
-def summarize_top_drivers(sample: Any, model: Any, n: int = 3) -> List[str]:
+def summarize_top_drivers(sample: Any, model: Any, n: int = 3) -> list[str]:
     """Return simple natural-language explanations for the top drivers.
 
     This helper builds human-readable sentences describing how the top ``n``
@@ -130,7 +123,7 @@ def summarize_top_drivers(sample: Any, model: Any, n: int = 3) -> List[str]:
         available an empty list is returned.
     """
     drivers = top_n_drivers(sample, model, n=n)
-    summaries: List[str] = []
+    summaries: list[str] = []
     for name, contrib in drivers:
         # Format contribution as basis points (multiply by 100 for percent, then 100 for bps)
         # But contributions are in logit score space; we keep raw numeric value for now.
