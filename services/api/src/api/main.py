@@ -16,6 +16,7 @@ from . import backtest_report as backtest_report_q
 from . import beta_onboarding as beta_onboarding_q
 from . import clob_credentials as clob_credentials_q
 from . import concentration as concentration_q
+from . import cost_watch as cost_watch_q
 from . import dp_aggregates as dp_aggregates_q
 from . import drift_report as drift_report_q
 from . import error_reports as error_reports_q
@@ -25,11 +26,14 @@ from . import features as features_q
 from . import journal as journal_q
 from . import journal_autosync as journal_autosync_q
 from . import markets as markets_q
+from . import model_admin as model_admin_q
 from . import onchain_metrics as onchain_metrics_q
 from . import polymarket_account as polymarket_account_q
 from . import privacy_prefs as privacy_prefs_q
 from . import push_prefs as push_prefs_q
 from . import regime as regime_q
+from . import regulatory_watch as regulatory_watch_q
+from . import security_audit as security_audit_q
 from . import signals as signals_q
 from . import smart_money as smart_money_q
 from . import source_health as source_health_q
@@ -87,6 +91,10 @@ class PushPreferencesRequest(BaseModel):
 
 class PrivacyPreferencesRequest(BaseModel):
     cross_user_learning_opt_in: bool = False
+
+
+class ModelDisableTransitionRequest(BaseModel):
+    reason: str | None = None
 
 
 class ClobCredentialRequest(BaseModel):
@@ -871,6 +879,120 @@ async def source_health(
     return payload
 
 
+@app.get("/v1/security/rotation-audit")
+async def security_rotation_audit(
+    rotation_interval_days: int = Query(90, ge=1, le=365 * 5),
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Aggregate credential-rotation status per provider.
+
+    Returns only aggregate counts and provider names — no user_id leaves
+    the endpoint, mirroring the privacy-audit invariant.
+    """
+    asked_at = datetime.now(tz=UTC)
+    try:
+        report = await security_audit_q.rotation_audit(
+            pool=pg,
+            asked_at=asked_at,
+            rotation_interval_days=rotation_interval_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "asked_at": report.asked_at.isoformat(),
+        "rotation_interval_days": report.rotation_interval_days,
+        "total_credentials": report.total_credentials,
+        "needs_rotation_count": report.needs_rotation_count,
+        "providers": [
+            {
+                "provider": p.provider,
+                "total_credentials": p.total_credentials,
+                "needs_rotation_count": p.needs_rotation_count,
+                "oldest_rotation_age_days": p.oldest_rotation_age_days,
+            }
+            for p in report.providers
+        ],
+    }
+
+
+@app.get("/v1/regulatory-events")
+async def regulatory_events_feed(
+    lookback_hours: int = Query(24 * 30, ge=1, le=24 * 365),
+    limit: int = Query(200, ge=1, le=1000),
+    keyword: list[str] | None = Query(default=None),
+    source: list[str] | None = Query(default=None),
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """Recent news/social events that match a prediction-market-regulation keyword.
+
+    Reader-only over ``external_events``; ingest is handled by the existing
+    RSS/Reddit workers. ``keyword`` defaults to the built-in regulatory set
+    (prediction market, gambling, CFTC, SEC, FCA, regulation) when omitted.
+    """
+    asked_at = datetime.now(tz=UTC)
+    matches = await regulatory_watch_q.regulatory_events_asof(
+        ch,
+        asked_at=asked_at,
+        lookback_hours=lookback_hours,
+        limit=limit,
+        keywords=keyword,
+        sources=source,
+    )
+    return {
+        "asked_at": asked_at.isoformat(),
+        "lookback_hours": lookback_hours,
+        "count": len(matches),
+        "matches": [
+            {
+                "event_kind": match.event.event_kind,
+                "source": match.event.source,
+                "source_uri": match.event.source_uri,
+                "source_id": match.event.source_id,
+                "title": match.event.title,
+                "url": match.event.url,
+                "event_time": match.event.event_time.isoformat(),
+                "observed_at": match.event.observed_at.isoformat(),
+                "matched_keywords": list(match.matched_keywords),
+            }
+            for match in matches
+        ],
+    }
+
+
+@app.get("/v1/cost-watch")
+async def cost_watch_feed(
+    lookback_hours: int = Query(24, ge=1, le=24 * 30),
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """Per-provider running spend over the trailing window.
+
+    Joins ``ingest_health`` request counts with operator-configured per-1k
+    unit prices so the operator dashboard can surface paid-API spend in $.
+    """
+    asked_at = datetime.now(tz=UTC)
+    report = await cost_watch_q.cost_watch_report(
+        ch,
+        asked_at=asked_at,
+        lookback_hours=lookback_hours,
+    )
+    return {
+        "asked_at": report.asked_at.isoformat(),
+        "lookback_hours": report.lookback_hours,
+        "total_cost_usd": report.total_cost_usd,
+        "providers": [
+            {
+                "provider": p.provider,
+                "sources": list(p.sources),
+                "request_count": p.request_count,
+                "cost_per_1k_requests": p.cost_per_1k_requests,
+                "cost_usd": p.cost_usd,
+            }
+            for p in report.providers
+        ],
+        "unmapped_sources": report.unmapped_sources,
+    }
+
+
 @app.get("/v1/onchain-metrics")
 async def onchain_metrics_feed(
     lookback_hours: int = Query(7 * 24, ge=1, le=24 * 90),
@@ -1417,4 +1539,58 @@ async def update_tuning_profile(
         "log_odds_shifts": profile.log_odds_shifts,
         "is_active": profile.is_active,
         "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+    }
+
+
+@app.post("/v1/admin/model/{market_type}/re-enable")
+async def admin_re_enable_model_type(
+    market_type: str,
+    payload: ModelDisableTransitionRequest | None = None,
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """Manually flip an auto-disabled per-type model back to enabled.
+
+    Appends a ``re_enabled`` row to ``model_disable_log``; the asof reader
+    serves the new state on the next request — no restart needed.
+    """
+    try:
+        transition = await model_admin_q.manually_re_enable_model_type(
+            ch,
+            market_type=market_type,
+            reason=payload.reason if payload is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "market_type": transition.market_type,
+        "action": transition.action,
+        "reason": transition.reason,
+        "observed_at": transition.observed_at.isoformat(),
+    }
+
+
+@app.post("/v1/admin/model/{market_type}/disable")
+async def admin_disable_model_type(
+    market_type: str,
+    payload: ModelDisableTransitionRequest | None = None,
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """Manually disable a per-type model.
+
+    Pre-emptively bypasses the ensemble before the next nightly drift
+    pass picks the regression up on its own.
+    """
+    try:
+        transition = await model_admin_q.manually_disable_model_type(
+            ch,
+            market_type=market_type,
+            reason=payload.reason if payload is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "market_type": transition.market_type,
+        "action": transition.action,
+        "reason": transition.reason,
+        "observed_at": transition.observed_at.isoformat(),
     }

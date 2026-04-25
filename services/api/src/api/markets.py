@@ -1209,6 +1209,9 @@ class MarketModelDetail:
     model_disabled_reason: str | None
     model_disabled_consecutive_days: int | None
     model_disabled_observed_at: datetime | None
+    # Internal: PIT-built EnsembleSample for this market at ``asked_at``.
+    # Excluded from the JSON payload (the retrain pipeline reads it directly).
+    ensemble_sample: EnsembleSample | None = None
 
 
 @dataclass(frozen=True)
@@ -1527,25 +1530,26 @@ async def model_for_market(
     )
     model_prob = tuning.tuned_probability
     model_reasons.extend(tuning.reasons)
+    ensemble_sample = _ensemble_sample_for_row(
+        classification=classification,
+        pipeline_result=pipeline_result,
+        market_mid=yes_mid,
+        sibling_prior=sibling_priors.get(condition_id),
+        feature_snapshot=feature_snapshot,
+        smart_money=smart_money_row,
+        concentration=concentration_row,
+        resolution_risk=resolution_risk_row,
+        adversarial_flow=adversarial_flow_row,
+        regime_label=regime_row.label if regime_row is not None else None,
+        onchain=onchain_context,
+        macro=macro_context,
+        concentration_threshold=settings.holder_concentration_down_weight_threshold,
+        asked_at=asked_at,
+    )
     driver_summaries, feature_attributions = _feature_attributions_for_sample(
         registry=registry,
         model_source=model_source,
-        sample=_ensemble_sample_for_row(
-            classification=classification,
-            pipeline_result=pipeline_result,
-            market_mid=yes_mid,
-            sibling_prior=sibling_priors.get(condition_id),
-            feature_snapshot=feature_snapshot,
-            smart_money=smart_money_row,
-            concentration=concentration_row,
-            resolution_risk=resolution_risk_row,
-            adversarial_flow=adversarial_flow_row,
-            regime_label=regime_row.label if regime_row is not None else None,
-            onchain=onchain_context,
-            macro=macro_context,
-            concentration_threshold=settings.holder_concentration_down_weight_threshold,
-            asked_at=asked_at,
-        ),
+        sample=ensemble_sample,
     )
     edge_bps = _edge_bps_with_resolution_risk(
         model_prob=model_prob,
@@ -1664,6 +1668,7 @@ async def model_for_market(
         model_disabled_observed_at=(
             disable_status.observed_at if disable_status is not None else None
         ),
+        ensemble_sample=ensemble_sample,
     )
 
 

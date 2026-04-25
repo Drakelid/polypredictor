@@ -70,6 +70,18 @@ class Settings(BaseSettings):
     resolution_risk_corpus_limit: int = 5000
     resolution_risk_corpus_lookback_days: int = 3650
     resolution_risk_multiplier_default: float = 1.0
+    # PRD §9 cost watch — per-1000-request operator-configured prices for
+    # paid third-party APIs. Default 0 keeps free sources at $0; operators
+    # override via env (`COST_PER_1K_REQUESTS_X_API`, etc.) once a contract
+    # is signed. The cost-watch endpoint joins these with `ingest_health`
+    # 24h request counts to surface running spend per provider.
+    cost_per_1k_requests_x_api: float = 0.0
+    cost_per_1k_requests_glassnode: float = 0.0
+    cost_per_1k_requests_dune: float = 0.0
+    cost_per_1k_requests_cme_fedwatch: float = 0.0
+    cost_per_1k_requests_deribit: float = 0.0
+    cost_per_1k_requests_polymarket: float = 0.0
+    cost_watch_lookback_hours: int = 24
     adversarial_flow_min_flow_strength: float = 0.15
     adversarial_flow_signal_window_hours: int = 24
     adversarial_flow_external_event_window_hours: int = 24

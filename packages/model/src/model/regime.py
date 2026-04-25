@@ -224,42 +224,241 @@ def regime_features_from_btc_closes(
     )
 
 
+_HMM_STATES: tuple[RegimeLabel, ...] = (
+    RegimeLabel.BULL_TREND,
+    RegimeLabel.BEAR_TREND,
+    RegimeLabel.CHOP,
+    RegimeLabel.LIQUIDITY_CRISIS,
+)
+
+
+@dataclass(frozen=True)
+class _StatePrototype:
+    realized_vol: float
+    momentum_7d: float
+    stablecoin_delta_7d: float
+
+
+# Emission prototypes per regime — see PRD §6.3 for the qualitative shape.
+# These reflect rough crypto-cycle norms; thresholds.py overrides only the
+# rule-based classifier, the HMM keeps its own continuous prototypes so the
+# emission likelihood degrades smoothly as features move between states.
+_HMM_PROTOTYPES: dict[RegimeLabel, _StatePrototype] = {
+    RegimeLabel.BULL_TREND: _StatePrototype(
+        realized_vol=0.60, momentum_7d=0.08, stablecoin_delta_7d=0.01
+    ),
+    RegimeLabel.BEAR_TREND: _StatePrototype(
+        realized_vol=0.60, momentum_7d=-0.08, stablecoin_delta_7d=-0.01
+    ),
+    RegimeLabel.CHOP: _StatePrototype(
+        realized_vol=0.30, momentum_7d=0.0, stablecoin_delta_7d=0.0
+    ),
+    RegimeLabel.LIQUIDITY_CRISIS: _StatePrototype(
+        realized_vol=1.50, momentum_7d=-0.10, stablecoin_delta_7d=-0.05
+    ),
+}
+
+# Per-feature standard deviations used as the diagonal of the (assumed
+# diagonal) Gaussian emission covariance.
+_HMM_FEATURE_SCALE = _StatePrototype(
+    realized_vol=0.40, momentum_7d=0.05, stablecoin_delta_7d=0.02
+)
+
+# Sticky 4x4 transition matrix. Diagonal = 0.85 stay-probability; off-diagonal
+# spread across the remaining states. Liquidity crises decay to BEAR_TREND
+# slightly faster than to other states.
+_HMM_TRANSITIONS: dict[RegimeLabel, dict[RegimeLabel, float]] = {
+    RegimeLabel.BULL_TREND: {
+        RegimeLabel.BULL_TREND: 0.85,
+        RegimeLabel.BEAR_TREND: 0.05,
+        RegimeLabel.CHOP: 0.07,
+        RegimeLabel.LIQUIDITY_CRISIS: 0.03,
+    },
+    RegimeLabel.BEAR_TREND: {
+        RegimeLabel.BULL_TREND: 0.05,
+        RegimeLabel.BEAR_TREND: 0.85,
+        RegimeLabel.CHOP: 0.05,
+        RegimeLabel.LIQUIDITY_CRISIS: 0.05,
+    },
+    RegimeLabel.CHOP: {
+        RegimeLabel.BULL_TREND: 0.06,
+        RegimeLabel.BEAR_TREND: 0.06,
+        RegimeLabel.CHOP: 0.85,
+        RegimeLabel.LIQUIDITY_CRISIS: 0.03,
+    },
+    RegimeLabel.LIQUIDITY_CRISIS: {
+        RegimeLabel.BULL_TREND: 0.02,
+        RegimeLabel.BEAR_TREND: 0.10,
+        RegimeLabel.CHOP: 0.03,
+        RegimeLabel.LIQUIDITY_CRISIS: 0.85,
+    },
+}
+
+# Initial-state prior — equal across the four states.
+_HMM_INITIAL_LOG_PRIOR = math.log(1.0 / len(_HMM_STATES))
+
+
+def _emission_log_likelihood(
+    features: RegimeFeatures, state: RegimeLabel
+) -> float:
+    """Diagonal-Gaussian log-likelihood of ``features`` under ``state``.
+
+    Missing features are dropped from the sum so partial inputs degrade
+    gracefully — consistent with the rule classifier's null-tolerant style.
+    """
+    prototype = _HMM_PROTOTYPES[state]
+    pairs = [
+        (features.btc_realized_vol_24h, prototype.realized_vol, _HMM_FEATURE_SCALE.realized_vol),
+        (features.btc_momentum_7d, prototype.momentum_7d, _HMM_FEATURE_SCALE.momentum_7d),
+        (
+            features.stablecoin_supply_delta_7d,
+            prototype.stablecoin_delta_7d,
+            _HMM_FEATURE_SCALE.stablecoin_delta_7d,
+        ),
+    ]
+    score = 0.0
+    n_observed = 0
+    for value, mean, sigma in pairs:
+        if value is None or sigma <= 0 or not math.isfinite(value):
+            continue
+        z = (value - mean) / sigma
+        score += -0.5 * z * z
+        n_observed += 1
+    if n_observed == 0:
+        # No observed features — uniform emission across states.
+        return 0.0
+    return score
+
+
+def _viterbi(
+    feature_sequence: Sequence[RegimeFeatures],
+) -> tuple[list[RegimeLabel], list[float]]:
+    """Standard log-domain Viterbi over the regime HMM.
+
+    Returns the most likely state sequence and a per-step confidence
+    derived from the softmax over states' Viterbi log-probabilities at
+    that step.
+    """
+    n = len(feature_sequence)
+    if n == 0:
+        return [], []
+
+    log_v: list[dict[RegimeLabel, float]] = [{} for _ in range(n)]
+    backpointer: list[dict[RegimeLabel, RegimeLabel | None]] = [{} for _ in range(n)]
+
+    # t = 0
+    for state in _HMM_STATES:
+        log_v[0][state] = (
+            _HMM_INITIAL_LOG_PRIOR + _emission_log_likelihood(feature_sequence[0], state)
+        )
+        backpointer[0][state] = None
+
+    # t > 0
+    for t in range(1, n):
+        for current in _HMM_STATES:
+            best_prev: RegimeLabel | None = None
+            best_score = -math.inf
+            for prev in _HMM_STATES:
+                trans = _HMM_TRANSITIONS[prev][current]
+                if trans <= 0:
+                    continue
+                candidate = log_v[t - 1][prev] + math.log(trans)
+                if candidate > best_score:
+                    best_score = candidate
+                    best_prev = prev
+            log_v[t][current] = best_score + _emission_log_likelihood(
+                feature_sequence[t], current
+            )
+            backpointer[t][current] = best_prev
+
+    # Backtrace from the highest-prob terminal state.
+    final_state = max(_HMM_STATES, key=lambda s: log_v[n - 1][s])
+    states_reversed: list[RegimeLabel] = [final_state]
+    for t in range(n - 1, 0, -1):
+        prev = backpointer[t][states_reversed[-1]]
+        if prev is None:
+            prev = states_reversed[-1]
+        states_reversed.append(prev)
+    state_sequence = list(reversed(states_reversed))
+
+    # Per-step confidence from the softmax over Viterbi log-probs.
+    confidences: list[float] = []
+    for t in range(n):
+        scores = [log_v[t][s] for s in _HMM_STATES]
+        confidences.append(_softmax_chosen(scores, _HMM_STATES.index(state_sequence[t])))
+    return state_sequence, confidences
+
+
+def _softmax_chosen(scores: Sequence[float], chosen_index: int) -> float:
+    """Numerically-stable softmax probability for the chosen index, clipped
+    into ``(0.5, 0.95)`` so tied/uncertain timesteps still report at least
+    moderate confidence — same convention the rule classifier uses."""
+    if not scores:
+        return 0.5
+    max_score = max(scores)
+    exps = [math.exp(s - max_score) for s in scores]
+    total = sum(exps)
+    if total <= 0:
+        return 0.5
+    posterior = exps[chosen_index] / total
+    return max(0.5, min(0.95, 0.5 + 0.45 * (posterior - 1.0 / len(scores))))
+
+
 def tag_regime_hmm(
     feature_sequence: Sequence[RegimeFeatures],
     *,
     thresholds: RegimeThresholds | None = None,
 ) -> list[RegimeResult]:
-    """Predict a regime label sequence using a placeholder HMM.
+    """Hidden-Markov-Model regime tagger over a daily feature sequence.
 
-    This stub exists to satisfy the M6.2 milestone requirement for an HMM-based
-    regime tagger. Until sufficient historical data is available to train a
-    proper hidden Markov model, this function falls back to applying
-    :func:`tag_regime` independently to each daily ``RegimeFeatures`` input.
+    The HMM has four discrete states matching :class:`RegimeLabel`. Emission
+    log-likelihoods are computed against per-state prototypes in
+    ``(realized_vol_24h, momentum_7d, stablecoin_supply_delta_7d)`` space
+    using a diagonal Gaussian; missing features are dropped from the sum so
+    short or partial daily series still produce a label. Transitions are
+    sticky (0.85 stay-probability) so a single noisy day can't flip the
+    regime — the temporal smoothing is the HMM's value over the rule-based
+    :func:`tag_regime` it sits next to.
 
-    Parameters
-    ----------
-    feature_sequence: Sequence[RegimeFeatures]
-        An ordered sequence of daily feature snapshots.
-    thresholds: RegimeThresholds | None, optional
-        Optional threshold overrides passed through to the rule-based
-        classifier.
+    The argument ``thresholds`` is accepted for API compatibility with the
+    rule classifier but is not used: the HMM has its own continuous emission
+    model. When ``thresholds`` is provided we still surface a leading reason
+    documenting that the rule overrides do not apply.
 
     Returns
     -------
     list[RegimeResult]
-        A list of regime results corresponding to each input element.
-
-    Notes
-    -----
-    A future implementation should fit an HMM on the joint distribution of
-    ``(btc_realized_vol_24h, btc_ndx_correlation_30d, stablecoin_supply_delta_7d)``
-    and infer a latent regime state. The current implementation is a
-    deterministic placeholder.
+        Per-step label, softmax-derived confidence, and a short reason
+        explaining the chosen state.
     """
-    results: list[RegimeResult] = []
-    for features in feature_sequence:
-        results.append(tag_regime(features, thresholds=thresholds))
-    return results
+    if not feature_sequence:
+        return []
+
+    states, confidences = _viterbi(feature_sequence)
+    out: list[RegimeResult] = []
+    for idx, (features, state, confidence) in enumerate(
+        zip(feature_sequence, states, confidences, strict=True)
+    ):
+        reasons: list[str] = []
+        if thresholds is not None:
+            reasons.append(
+                "HMM emission prototypes ignore RegimeThresholds; pass via tag_regime if rule overrides are required"
+            )
+        emission = _emission_log_likelihood(features, state)
+        reasons.append(
+            f"HMM step {idx + 1}/{len(feature_sequence)}: state={state.value}, "
+            f"emission_loglik={emission:.2f}"
+        )
+        if features.btc_realized_vol_24h is not None:
+            reasons.append(f"realized vol = {features.btc_realized_vol_24h:.0%}")
+        if features.btc_momentum_7d is not None:
+            reasons.append(f"7d momentum = {features.btc_momentum_7d:+.1%}")
+        if features.stablecoin_supply_delta_7d is not None:
+            reasons.append(
+                f"7d stablecoin Δ = {features.stablecoin_supply_delta_7d:+.1%}"
+            )
+        out.append(RegimeResult(label=state, confidence=confidence, reasons=reasons))
+    return out
 
 
 __all__ = [

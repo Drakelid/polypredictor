@@ -1,4 +1,4 @@
-.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics retention-archive-plan drift-monitor signal-ablation resolution-risk-corpus dp-aggregates m7-audit
+.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics retention-archive-plan drift-monitor signal-ablation resolution-risk-corpus dp-aggregates m7-audit ensemble-retrain
 
 help:
 	@echo "Common targets:"
@@ -34,6 +34,7 @@ help:
 	@echo "  make resolution-risk-corpus # build the resolution-risk training corpus once"
 	@echo "  make dp-aggregates   # build the latest differentially private label aggregates once"
 	@echo "  make m7-audit        # run the M7 journal+tuning exit audit once"
+	@echo "  make ensemble-retrain # PIT-replay resolved markets and refit per-type ensembles"
 
 install:
 	uv sync
@@ -132,3 +133,6 @@ dp-aggregates:
 
 m7-audit:
 	uv run python -m api.m7_audit
+
+ensemble-retrain:
+	uv run python -m api.ensemble_retrain
