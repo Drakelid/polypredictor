@@ -30,7 +30,7 @@ class _FakeClickHouse:
 
 
 @pytest.mark.asyncio
-async def test_latest_binary_resolutions_returns_latest_yes_no_rows() -> None:
+async def test_latest_binary_resolutions_returns_first_observed_yes_no_rows() -> None:
     ch = _FakeClickHouse(
         [
             ("cond-1", "YES", datetime(2026, 4, 1, tzinfo=UTC)),
@@ -50,6 +50,7 @@ async def test_latest_binary_resolutions_returns_latest_yes_no_rows() -> None:
         ("cond-2", "NO", datetime(2026, 4, 2, tzinfo=UTC)),
     ]
     assert "resolved_outcome IN ('YES', 'NO')" in ch.queries[0][0]
+    assert "ORDER BY condition_id, observed_at ASC" in ch.queries[0][0]
     assert ch.queries[0][1] == {
         "limit": 50,
         "resolved_from": datetime(2026, 3, 1, tzinfo=UTC),

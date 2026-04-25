@@ -64,3 +64,59 @@ async def test_fetch_iv_reuses_cached_book_summary_by_currency() -> None:
     assert second.realized_vol == pytest.approx(0.44)
     assert summary_route.call_count == 1
     assert hv_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_fetch_term_structure_returns_atm_and_skew_points() -> None:
+    respx.get(
+        "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "result": [
+                    {
+                        "instrument_name": "BTC-30MAY26-95000-P",
+                        "underlying_price": 100_000,
+                        "mark_iv": 58.0,
+                    },
+                    {
+                        "instrument_name": "BTC-30MAY26-100000-C",
+                        "underlying_price": 100_000,
+                        "mark_iv": 55.0,
+                    },
+                    {
+                        "instrument_name": "BTC-30MAY26-105000-C",
+                        "underlying_price": 100_000,
+                        "mark_iv": 61.0,
+                    },
+                    {
+                        "instrument_name": "BTC-27JUN26-100000-C",
+                        "underlying_price": 100_000,
+                        "mark_iv": 57.0,
+                    },
+                    {
+                        "instrument_name": "BTC-27JUN26-95000-P",
+                        "underlying_price": 100_000,
+                        "mark_iv": 59.0,
+                    },
+                    {
+                        "instrument_name": "BTC-27JUN26-105000-C",
+                        "underlying_price": 100_000,
+                        "mark_iv": 63.0,
+                    },
+                ]
+            },
+        )
+    )
+
+    async with DeribitClient(cache_ttl_s=60.0) as client:
+        points = await client.fetch_term_structure(currency="BTC")
+
+    assert len(points) == 2
+    assert points[0].currency == "BTC"
+    assert points[0].atm_iv == pytest.approx(0.55)
+    assert points[0].call_otm_iv == pytest.approx(0.61)
+    assert points[0].put_otm_iv == pytest.approx(0.58)
+    assert points[0].strike_skew == pytest.approx(0.03)

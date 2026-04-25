@@ -28,18 +28,34 @@ from model import (
     FeatureContribution,
     MarketType,
     PipelineResult,
+    SiblingMarket,
+    SiblingPrior,
+    SiblingQuote,
     SplitConformalRegistry,
+    build_threshold_pairs,
     classify,
     probability_for_market,
+    sibling_prior_for_market,
 )
 
 from . import asof as asof_q
+from . import model_status
+from .adversarial_flow import (
+    AdversarialFlowContext,
+    adversarial_flow_asof,
+    adversarial_flow_batch_contexts,
+)
 from .classifications import (
     ClassificationRow,
     classification_asof,
     classifications_batch_asof,
 )
 from .cme_fedwatch import CMEFedWatchClient
+from .concentration import (
+    MarketConcentration,
+    concentration_asof,
+    concentration_batch_asof,
+)
 from .conformal_registry import load_conformal_registry
 from .discrete_inputs import resolve_discrete_record
 from .ensemble_registry import load_ensemble_registry
@@ -50,7 +66,25 @@ from .long_tail_priors import (
     load_long_tail_resolved_markets,
     long_tail_prior_context,
 )
+from .macro_features import MacroFeatureContext, load_macro_feature_context
+from .model_status import ModelDisableStatus, model_disable_status_asof
+from .onchain_features import (
+    OnchainFeatureContext,
+    load_onchain_feature_context,
+)
+from .regime import regime_label_asof
+from .resolution_risk import (
+    ResolutionRiskRow,
+    resolution_risk_asof,
+    resolution_risk_batch_asof,
+)
 from .settings import Settings, get_settings
+from .smart_money import (
+    SmartMoneyPerMarket,
+    smart_money_asof,
+    smart_money_batch_asof,
+)
+from .tuning import TuningAdjustmentContext, TuningProfile, apply_tuning_adjustment
 
 
 @dataclass(frozen=True)
@@ -76,6 +110,18 @@ class MarketListRow:
     needs_review: bool
     confidence: float
     time_to_resolution_s: float | None
+    # M3 Polymarket-native signals (nullable when data has not yet landed).
+    smart_money_consensus: float | None
+    smart_money_sample_wallets: int | None
+    smart_money_dominant: str | None
+    concentration_score: float | None
+    concentration_whale_flag: bool | None
+    resolution_risk_score: float | None
+    resolution_risk_level: str | None
+    resolution_risk_flagged: bool
+    adversarial_flow_score: float | None
+    adversarial_flow_flagged: bool
+    thin_book: bool
 
 
 @dataclass(frozen=True)
@@ -99,6 +145,81 @@ class BaselineContext:
     multi_outcome: MultiOutcomeContext | None = None
     long_tail: LongTailPriorContext | None = None
     long_tail_candidates: list[LongTailResolvedMarket] | None = None
+
+
+def _tuning_context_for_row(
+    *,
+    model_prob: float | None,
+    sibling_prior: SiblingPrior | None,
+    smart_money: SmartMoneyPerMarket | None,
+    concentration: MarketConcentration | None,
+    resolution_risk: ResolutionRiskRow | None,
+    adversarial_flow: AdversarialFlowContext | None,
+) -> TuningAdjustmentContext:
+    return TuningAdjustmentContext(
+        model_prob=model_prob,
+        smart_money_consensus=(
+            smart_money.consensus_score if smart_money is not None else None
+        ),
+        smart_money_dominant=(
+            smart_money.dominant_outcome if smart_money is not None else None
+        ),
+        sibling_implied_prior=(
+            sibling_prior.implied_prior if sibling_prior is not None else None
+        ),
+        concentration_score=_concentration_score(concentration),
+        resolution_risk_score=(
+            resolution_risk.risk_score if resolution_risk is not None else None
+        ),
+        adversarial_flow_score=(
+            adversarial_flow.score if adversarial_flow is not None else None
+        ),
+    )
+
+
+def _sibling_market_rows(
+    snaps: list[dict[str, object]],
+    classifications: dict[str, ClassificationRow],
+    mids: dict[str, float],
+) -> dict[str, SiblingMarket]:
+    out: dict[str, SiblingMarket] = {}
+    for snap in snaps:
+        condition_id = str(snap["condition_id"])
+        classification = classifications.get(condition_id)
+        if classification is None:
+            continue
+        if classification.market_type not in {MarketType.THRESHOLD, MarketType.MULTI_OUTCOME}:
+            continue
+        token_ids = list(snap.get("token_ids") or [])  # type: ignore[arg-type]
+        yes_mid = mids.get(token_ids[0]) if token_ids else None
+        out[condition_id] = SiblingMarket(
+            condition_id=condition_id,
+            question=str(snap["question"]),
+            event_id=str(snap.get("event_id") or "") or None,
+            market_type=classification.market_type,
+            asset=classification.features.asset,
+            direction=classification.features.direction,
+            strike=classification.features.strike,
+            resolution_date=classification.features.resolution_date,
+            quote=SiblingQuote(
+                mid=yes_mid,
+                best_bid=None,
+                best_ask=None,
+            ),
+        )
+    return out
+
+
+def _sibling_priors_by_condition(
+    sibling_markets: dict[str, SiblingMarket],
+) -> dict[str, SiblingPrior]:
+    threshold_pairs = build_threshold_pairs(list(sibling_markets.values()))
+    out: dict[str, SiblingPrior] = {}
+    for condition_id, market in sibling_markets.items():
+        prior = sibling_prior_for_market(market, threshold_pairs)
+        if prior is not None and prior.implied_prior is not None:
+            out[condition_id] = prior
+    return out
 
 
 async def _latest_markets(
@@ -517,20 +638,85 @@ def _edge_bps(model_prob: float | None, market_mid: float | None) -> float | Non
     return (model_prob - market_mid) * 10_000.0
 
 
+def _concentration_score(concentration: MarketConcentration | None) -> float | None:
+    """Single-axis summary of how concentrated holders are.
+
+    Prefers the pre-computed ``max_gini`` (max of YES/NO Gini). Falls back to
+    ``max(top1_pct)`` when Gini isn't computable (e.g. < 2 holders in the
+    top-N), which is still a monotone concentration proxy.
+    """
+    if concentration is None:
+        return None
+    if concentration.max_gini is not None:
+        return concentration.max_gini
+    top1s = [
+        value
+        for value in (concentration.yes_top1_pct, concentration.no_top1_pct)
+        if value is not None
+    ]
+    return max(top1s) if top1s else None
+
+
+def _smart_money_consensus_feature(
+    smart_money: SmartMoneyPerMarket | None,
+    concentration: MarketConcentration | None,
+    *,
+    concentration_threshold: float,
+) -> float | None:
+    """PRD: down-weight ``smart_money_consensus`` when concentration > 0.6.
+
+    When concentration is high the "smart money" signal is much more likely
+    to be a handful of whales, not diffuse conviction, so we attenuate the
+    raw consensus score toward zero before the ensemble sees it. Below the
+    threshold the consensus passes through unchanged.
+    """
+    if smart_money is None:
+        return None
+    raw = smart_money.consensus_score
+    score = _concentration_score(concentration)
+    if score is None or score <= concentration_threshold:
+        return raw
+    # Linear attenuation from the threshold to a fully concentrated market.
+    # At score == threshold the feature is unchanged; at score == 1 it is
+    # scaled to zero. Between those, we shrink proportionally.
+    span = max(1e-9, 1.0 - concentration_threshold)
+    attenuation = max(0.0, 1.0 - (score - concentration_threshold) / span)
+    return raw * attenuation
+
+
 def _ensemble_sample_for_row(
     *,
     classification: ClassificationRow,
     pipeline_result: PipelineResult,
     market_mid: float | None,
+    sibling_prior: SiblingPrior | None,
     feature_snapshot: FeatureSnapshotRow | None,
+    smart_money: SmartMoneyPerMarket | None,
+    concentration: MarketConcentration | None,
+    resolution_risk: ResolutionRiskRow | None = None,
+    adversarial_flow: AdversarialFlowContext | None = None,
+    regime_label: str | None = None,
+    onchain: OnchainFeatureContext | None = None,
+    macro: MacroFeatureContext | None = None,
+    concentration_threshold: float,
     asked_at: datetime,
 ) -> EnsembleSample | None:
     if pipeline_result.baseline.probability is None or feature_snapshot is None:
         return None
+    onchain_asset_features = (
+        onchain.for_asset(classification.features.asset)
+        if onchain is not None
+        else None
+    )
     return EnsembleSample(
         market_type=classification.market_type,
         p_base=float(pipeline_result.baseline.probability),
         market_mid=market_mid,
+        sibling_implied_prior=(
+            sibling_prior.implied_prior
+            if sibling_prior is not None
+            else None
+        ),
         spread=feature_snapshot.spread,
         book_imbalance_1pct=feature_snapshot.book_imbalance_1pct,
         book_imbalance_5pct=feature_snapshot.book_imbalance_5pct,
@@ -541,6 +727,47 @@ def _ensemble_sample_for_row(
         informed_taker_flow_24h=feature_snapshot.informed_taker_flow_24h,
         passive_maker_flow_24h=feature_snapshot.passive_maker_flow_24h,
         decayed_directional_flow_24h=feature_snapshot.decayed_directional_flow_24h,
+        smart_money_consensus=_smart_money_consensus_feature(
+            smart_money,
+            concentration,
+            concentration_threshold=concentration_threshold,
+        ),
+        holder_concentration=_concentration_score(concentration),
+        resolution_risk_score=(
+            resolution_risk.risk_score if resolution_risk is not None else None
+        ),
+        adversarial_flow_score=(
+            adversarial_flow.score if adversarial_flow is not None else None
+        ),
+        regime_label=regime_label,
+        onchain_exchange_inflow_z=(
+            onchain_asset_features.exchange_inflow_z
+            if onchain_asset_features is not None
+            else None
+        ),
+        onchain_exchange_outflow_z=(
+            onchain_asset_features.exchange_outflow_z
+            if onchain_asset_features is not None
+            else None
+        ),
+        onchain_whale_count_delta_pct=(
+            onchain_asset_features.whale_count_delta_pct
+            if onchain_asset_features is not None
+            else None
+        ),
+        onchain_stablecoin_supply_delta_pct=(
+            onchain.stablecoin_supply_delta_pct if onchain is not None else None
+        ),
+        macro_fed_funds_30d_delta=(
+            macro.fed_funds_30d_delta if macro is not None else None
+        ),
+        macro_treasury_10y_30d_delta=(
+            macro.treasury_10y_30d_delta if macro is not None else None
+        ),
+        macro_yield_curve_2s10s=(
+            macro.yield_curve_2s10s if macro is not None else None
+        ),
+        macro_cpi_yoy_pct=(macro.cpi_yoy_pct if macro is not None else None),
         asked_at=asked_at.timestamp(),
     )
 
@@ -551,11 +778,37 @@ def _apply_ensemble_refinement(
     classification: ClassificationRow,
     pipeline_result: PipelineResult,
     market_mid: float | None,
+    sibling_prior: SiblingPrior | None,
     feature_snapshot: FeatureSnapshotRow | None,
+    smart_money: SmartMoneyPerMarket | None,
+    concentration: MarketConcentration | None,
+    resolution_risk: ResolutionRiskRow | None = None,
+    adversarial_flow: AdversarialFlowContext | None = None,
+    regime_label: str | None = None,
+    onchain: OnchainFeatureContext | None = None,
+    macro: MacroFeatureContext | None = None,
+    disable_status: ModelDisableStatus | None = None,
+    concentration_threshold: float,
+    adversarial_flow_blend_floor: float,
     asked_at: datetime,
 ) -> tuple[float | None, str, str | None, list[str]]:
     baseline_prob = pipeline_result.displayed_probability
     baseline_reasons = list(pipeline_result.baseline.reasons)
+    # PRD §8 auto-disable: when the per-type model is in `disabled` state
+    # (drift driver flagged ≥7 consecutive negative-skill days) we MUST
+    # short-circuit the ensemble and serve the baseline / market_mid path
+    # instead. The reason is appended so the UI can show "auto-disabled".
+    if disable_status is not None and disable_status.is_disabled:
+        return (
+            baseline_prob,
+            "baseline_disabled",
+            None,
+            [
+                *baseline_reasons,
+                f"Ensemble auto-disabled for {classification.market_type.value}: "
+                f"{disable_status.reason}",
+            ],
+        )
     if registry is None:
         return baseline_prob, "baseline", None, baseline_reasons
     if registry.model_for_type(classification.market_type) is None:
@@ -565,7 +818,16 @@ def _apply_ensemble_refinement(
         classification=classification,
         pipeline_result=pipeline_result,
         market_mid=market_mid,
+        sibling_prior=sibling_prior,
         feature_snapshot=feature_snapshot,
+        smart_money=smart_money,
+        concentration=concentration,
+        resolution_risk=resolution_risk,
+        adversarial_flow=adversarial_flow,
+        regime_label=regime_label,
+        onchain=onchain,
+        macro=macro,
+        concentration_threshold=concentration_threshold,
         asked_at=asked_at,
     )
     if sample is None:
@@ -583,6 +845,19 @@ def _apply_ensemble_refinement(
         f"Per-type ensemble refinement over {pipeline_result.displayed_source.value}",
         f"PIT feature snapshot @ {feature_snapshot.observed_at.isoformat()}",
     ]
+    if (
+        adversarial_flow is not None
+        and baseline_prob is not None
+        and adversarial_flow.score > 0.0
+    ):
+        attenuation = max(
+            adversarial_flow_blend_floor,
+            1.0 - adversarial_flow.score,
+        )
+        refined = baseline_prob + (refined - baseline_prob) * attenuation
+        model_reasons.append(
+            f"Adversarial-flow guard applied; ensemble delta scaled to {attenuation:.2f}"
+        )
     return refined, "ensemble", "per_type_ensemble_v1", model_reasons
 
 
@@ -594,6 +869,7 @@ def _apply_conformal_interval(
     time_to_resolution_s: float | None,
     uncertainty_multiplier: float,
     resolution_risk_multiplier: float,
+    regime: str | None = None,
 ) -> tuple[float | None, float | None, float | None, str | None]:
     if registry is None or model_prob is None:
         return None, None, None, None
@@ -603,6 +879,7 @@ def _apply_conformal_interval(
         time_to_resolution_s=time_to_resolution_s,
         uncertainty_multiplier=uncertainty_multiplier,
         resolution_risk_multiplier=resolution_risk_multiplier,
+        regime=regime,
     )
     if interval is None:
         return None, None, None, None
@@ -611,26 +888,69 @@ def _apply_conformal_interval(
 
 
 async def list_markets(
-    ch: AsyncClient, *, asked_at: datetime, limit: int = 200
+    ch: AsyncClient,
+    *,
+    asked_at: datetime,
+    limit: int = 200,
+    tuning_profile: TuningProfile | None = None,
 ) -> list[MarketListRow]:
-    snaps = await _latest_markets(ch, asked_at, limit=limit)
-    if not snaps:
+    all_snaps = await _latest_markets(ch, asked_at, limit=max(limit, 500))
+    if not all_snaps:
         return []
+    snaps = all_snaps[:limit]
+    settings = get_settings()
 
     all_tokens: list[str] = []
-    for s in snaps:
+    for s in all_snaps:
         all_tokens.extend(list(s.get("token_ids") or []))  # type: ignore[arg-type]
     mids = await _latest_mids_for_tokens(ch, all_tokens, asked_at)
-    classifications = await classifications_batch_asof(
-        ch, [str(s["condition_id"]) for s in snaps], asked_at
+    all_condition_ids = [str(s["condition_id"]) for s in all_snaps]
+    condition_ids = [str(s["condition_id"]) for s in snaps]
+    all_classifications = await classifications_batch_asof(ch, all_condition_ids, asked_at)
+    classifications = {condition_id: all_classifications[condition_id] for condition_id in condition_ids if condition_id in all_classifications}
+    feature_snapshots = await feature_snapshots_batch_asof(ch, condition_ids, asked_at)
+    token_ids_by_condition = {
+        str(s["condition_id"]): next(iter(s.get("token_ids") or []), "")
+        for s in snaps
+    }
+    adversarial_rows = await adversarial_flow_batch_contexts(
+        ch,
+        condition_ids=condition_ids,
+        token_ids_by_condition=token_ids_by_condition,
+        feature_snapshots=feature_snapshots,
+        asked_at=asked_at,
+        settings=settings,
     )
-    feature_snapshots = await feature_snapshots_batch_asof(
-        ch, [str(s["condition_id"]) for s in snaps], asked_at
+    smart_money_rows = await smart_money_batch_asof(ch, condition_ids, asked_at)
+    concentration_rows = await concentration_batch_asof(ch, condition_ids, asked_at)
+    resolution_risk_rows = await resolution_risk_batch_asof(ch, condition_ids, asked_at)
+    sibling_priors = _sibling_priors_by_condition(
+        _sibling_market_rows(all_snaps, all_classifications, mids)
     )
     multi_outcome_contexts = await _multi_outcome_contexts_for_markets(ch, snaps, asked_at)
     long_tail_candidates = await load_long_tail_resolved_markets(ch, asked_at=asked_at)
+    regime_row = await regime_label_asof(ch, asked_at)
+    # On-chain feature context (PRD §6.3): one trailing-30d batched read at
+    # request time builds the per-asset z-scores / pct-deltas dict; per-market
+    # population is then a dict lookup keyed by classification.features.asset.
+    onchain_context = await load_onchain_feature_context(ch, asked_at)
+    # Macro feature context (PRD §5.2 / §6.3): asset-agnostic FRED-derived
+    # scalars (rates, curve, CPI YoY). One batched read per request.
+    macro_context = await load_macro_feature_context(ch, asked_at)
+    # Auto-disable status (M6.3) is per market_type, ~6 distinct values, so we
+    # batch-load it once for the whole list rather than per-market.
+    distinct_market_types = sorted(
+        {
+            cls.market_type.value
+            for cls in classifications.values()
+        }
+    )
+    disable_status_by_type = await model_status.model_disable_status_batch_asof(
+        ch,
+        market_types=distinct_market_types,
+        asked_at=asked_at,
+    )
 
-    settings = get_settings()
     discrete = _discrete_config_from_settings(settings)
     registry = load_ensemble_registry(settings.ensemble_registry_file)
     rows: list[MarketListRow] = []
@@ -692,9 +1012,39 @@ async def list_markets(
                 classification=classification,
                 pipeline_result=result,
                 market_mid=yes_mid,
+                sibling_prior=sibling_priors.get(cid),
                 feature_snapshot=feature_snapshots.get(cid),
+                smart_money=smart_money_rows.get(cid),
+                concentration=concentration_rows.get(cid),
+                resolution_risk=resolution_risk_rows.get(cid),
+                adversarial_flow=adversarial_rows.get(cid),
+                regime_label=regime_row.label if regime_row is not None else None,
+                onchain=onchain_context,
+                macro=macro_context,
+                disable_status=disable_status_by_type.get(
+                    classification.market_type.value
+                ),
+                concentration_threshold=settings.holder_concentration_down_weight_threshold,
+                adversarial_flow_blend_floor=settings.adversarial_flow_blend_floor,
                 asked_at=asked_at,
             )
+            sm_row = smart_money_rows.get(cid)
+            conc_row = concentration_rows.get(cid)
+            risk_row = resolution_risk_rows.get(cid)
+            adversarial_row = adversarial_rows.get(cid)
+            tuning = apply_tuning_adjustment(
+                profile=tuning_profile,
+                context=_tuning_context_for_row(
+                    model_prob=model_prob,
+                    sibling_prior=sibling_priors.get(cid),
+                    smart_money=sm_row,
+                    concentration=conc_row,
+                    resolution_risk=risk_row,
+                    adversarial_flow=adversarial_row,
+                ),
+                concentration_threshold=settings.holder_concentration_down_weight_threshold,
+            )
+            model_prob = tuning.tuned_probability
             rows.append(
                 MarketListRow(
                     condition_id=cid,
@@ -712,12 +1062,50 @@ async def list_markets(
                     model_source=model_source,
                     refinement_source=refinement_source,
                     baseline_source=str(result.displayed_source.value),
-                    edge_bps=_edge_bps(model_prob, yes_mid),
+                    edge_bps=_edge_bps_with_resolution_risk(
+                        model_prob=model_prob,
+                        market_mid=yes_mid,
+                        resolution_risk=risk_row,
+                        suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
+                    ),
                     needs_review=classification.needs_review,
                     confidence=classification.confidence,
                     time_to_resolution_s=_time_to_resolution_s(
                         snap.get("end_date"),  # type: ignore[arg-type]
                         asked_at,
+                    ),
+                    smart_money_consensus=(
+                        sm_row.consensus_score if sm_row is not None else None
+                    ),
+                    smart_money_sample_wallets=(
+                        sm_row.sample_wallets if sm_row is not None else None
+                    ),
+                    smart_money_dominant=(
+                        sm_row.dominant_outcome if sm_row is not None else None
+                    ),
+                    concentration_score=_concentration_score(conc_row),
+                    concentration_whale_flag=(
+                        conc_row.any_whale_flag if conc_row is not None else None
+                    ),
+                    resolution_risk_score=(
+                        risk_row.risk_score if risk_row is not None else None
+                    ),
+                    resolution_risk_level=(
+                        risk_row.risk_level if risk_row is not None else None
+                    ),
+                    resolution_risk_flagged=(
+                        risk_row.is_flagged if risk_row is not None else False
+                    ),
+                    adversarial_flow_score=(
+                        adversarial_row.score if adversarial_row is not None else None
+                    ),
+                    adversarial_flow_flagged=(
+                        adversarial_row.is_flagged
+                        if adversarial_row is not None
+                        else False
+                    ),
+                    thin_book=(
+                        adversarial_row.thin_book if adversarial_row is not None else False
                     ),
                 )
             )
@@ -737,6 +1125,9 @@ class MarketModelDetail:
     model_source: str
     refinement_source: str | None
     baseline_source: str
+    tuning_profile: str | None
+    tuning_preset: str | None
+    tuning_log_odds_shift: float
     edge_bps: float | None
     uncertainty_multiplier: float
     band_lo: float | None
@@ -754,6 +1145,34 @@ class MarketModelDetail:
     classifier_reasons: list[str]
     driver_summaries: list[str]
     feature_attributions: list[dict[str, object]]
+    # M3 Polymarket-native signal badges.
+    smart_money_consensus: float | None
+    smart_money_sample_wallets: int | None
+    smart_money_dominant: str | None
+    concentration_score: float | None
+    concentration_whale_flag: bool | None
+    concentration_yes_top1_pct: float | None
+    concentration_no_top1_pct: float | None
+    resolution_risk_score: float | None
+    resolution_risk_level: str | None
+    resolution_risk_flagged: bool
+    resolution_risk_reasons: list[str]
+    adversarial_flow_score: float | None
+    adversarial_flow_flagged: bool
+    adversarial_flow_reasons: list[str]
+    thin_book: bool
+    # M6.2 regime — null when no daily tag has been written yet.
+    regime_label: str | None
+    regime_confidence: float | None
+    regime_classifier: str | None
+    regime_observed_at: datetime | None
+    # M6.3 auto-disable — when true, the ensemble is short-circuited and the
+    # baseline path serves the displayed probability. Null when this market
+    # type has never been touched by the auto-disable rule.
+    model_disabled: bool
+    model_disabled_reason: str | None
+    model_disabled_consecutive_days: int | None
+    model_disabled_observed_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -801,6 +1220,7 @@ def _attribution_label(feature_name: str) -> str:
     labels = {
         "p_base_logit": "Baseline prior",
         "market_mid_logit": "Market price",
+        "sibling_implied_prior_logit": "Sibling-implied prior",
         "spread": "Spread",
         "book_imbalance_1pct": "1% book imbalance",
         "book_imbalance_5pct": "5% book imbalance",
@@ -811,6 +1231,14 @@ def _attribution_label(feature_name: str) -> str:
         "informed_taker_flow_24h": "Informed taker flow",
         "passive_maker_flow_24h": "Passive maker flow",
         "decayed_directional_flow_24h": "Decayed directional flow",
+        "smart_money_consensus": "Smart-money consensus",
+        "holder_concentration": "Holder concentration",
+        "resolution_risk_score": "Resolution risk",
+        "adversarial_flow_score": "Adversarial flow",
+        "regime_bull_trend": "Bull-trend regime",
+        "regime_bear_trend": "Bear-trend regime",
+        "regime_chop": "Chop regime",
+        "regime_liquidity_crisis": "Liquidity-crisis regime",
     }
     return labels.get(feature_name, feature_name.replace("_", " "))
 
@@ -818,9 +1246,40 @@ def _attribution_label(feature_name: str) -> str:
 def _format_feature_value(feature_name: str, feature_value: float | None) -> str:
     if feature_value is None:
         return "n/a"
-    if feature_name in {"p_base_logit", "market_mid_logit", "realized_vol_24h"}:
+    if feature_name in {
+        "p_base_logit",
+        "market_mid_logit",
+        "sibling_implied_prior_logit",
+        "realized_vol_24h",
+        "resolution_risk_score",
+        "adversarial_flow_score",
+    }:
         return f"{feature_value * 100:.1f}%"
+    if feature_name.startswith("regime_"):
+        return "active" if feature_value >= 0.5 else "inactive"
     return f"{feature_value:+.3f}"
+
+
+def _effective_resolution_risk_multiplier(
+    row: ResolutionRiskRow | None,
+    *,
+    default: float,
+) -> float:
+    if row is None:
+        return default
+    return max(default, row.risk_multiplier)
+
+
+def _edge_bps_with_resolution_risk(
+    *,
+    model_prob: float | None,
+    market_mid: float | None,
+    resolution_risk: ResolutionRiskRow | None,
+    suppress_threshold: float,
+) -> float | None:
+    if resolution_risk is not None and resolution_risk.risk_score >= suppress_threshold:
+        return None
+    return _edge_bps(model_prob, market_mid)
 
 
 def _driver_summary(contribution: FeatureContribution) -> str:
@@ -866,7 +1325,11 @@ def _feature_attributions_for_sample(
 
 
 async def model_for_market(
-    ch: AsyncClient, *, condition_id: str, asked_at: datetime
+    ch: AsyncClient,
+    *,
+    condition_id: str,
+    asked_at: datetime,
+    tuning_profile: TuningProfile | None = None,
 ) -> MarketModelDetail | None:
     """Model-probability + provenance payload for the detail view."""
     query = """
@@ -900,16 +1363,51 @@ async def model_for_market(
     tok_ids = list(snap["token_ids"])  # type: ignore[arg-type]
     mids = await _latest_mids_for_tokens(ch, tok_ids, asked_at)
     yes_mid = mids.get(tok_ids[0]) if tok_ids else None
+    settings = get_settings()
 
     classification = await classification_asof(ch, condition_id, asked_at)
     feature_snapshot = await feature_snapshot_asof(ch, condition_id, asked_at)
+    smart_money_row = await smart_money_asof(ch, condition_id, asked_at)
+    concentration_row = await concentration_asof(ch, condition_id, asked_at)
+    regime_row = await regime_label_asof(ch, asked_at)
+    onchain_context = await load_onchain_feature_context(ch, asked_at)
+    macro_context = await load_macro_feature_context(ch, asked_at)
+    disable_status = (
+        await model_disable_status_asof(
+            ch,
+            market_type=classification.market_type.value,
+            asked_at=asked_at,
+        )
+        if classification is not None
+        else None
+    )
+    resolution_risk_row = await resolution_risk_asof(ch, condition_id, asked_at)
+    adversarial_flow_row = await adversarial_flow_asof(
+        ch,
+        condition_id=condition_id,
+        token_id=tok_ids[0] if tok_ids else None,
+        feature_snapshot=feature_snapshot,
+        asked_at=asked_at,
+        settings=settings,
+    )
+    active_snaps = await _latest_markets(ch, asked_at, limit=500)
+    active_condition_ids = [str(s["condition_id"]) for s in active_snaps]
+    active_classifications = await classifications_batch_asof(
+        ch, active_condition_ids, asked_at
+    )
+    active_tokens: list[str] = []
+    for row in active_snaps:
+        active_tokens.extend(list(row.get("token_ids") or []))  # type: ignore[arg-type]
+    active_mids = await _latest_mids_for_tokens(ch, active_tokens, asked_at)
+    sibling_priors = _sibling_priors_by_condition(
+        _sibling_market_rows(active_snaps, active_classifications, active_mids)
+    )
     multi_outcome_contexts = await _multi_outcome_contexts_for_markets(ch, [snap], asked_at)
     long_tail_candidates = await load_long_tail_resolved_markets(ch, asked_at=asked_at)
     time_to_resolution_s = _time_to_resolution_s(
         snap.get("end_date"),  # type: ignore[arg-type]
         asked_at,
     )
-    settings = get_settings()
     discrete = _discrete_config_from_settings(settings)
     registry = load_ensemble_registry(settings.ensemble_registry_file)
     conformal_registry = load_conformal_registry(settings.conformal_registry_file)
@@ -965,9 +1463,34 @@ async def model_for_market(
         classification=classification,
         pipeline_result=pipeline_result,
         market_mid=yes_mid,
+        sibling_prior=sibling_priors.get(condition_id),
         feature_snapshot=feature_snapshot,
+        smart_money=smart_money_row,
+        concentration=concentration_row,
+        resolution_risk=resolution_risk_row,
+        adversarial_flow=adversarial_flow_row,
+        regime_label=regime_row.label if regime_row is not None else None,
+        onchain=onchain_context,
+        macro=macro_context,
+        disable_status=disable_status,
+        concentration_threshold=settings.holder_concentration_down_weight_threshold,
+        adversarial_flow_blend_floor=settings.adversarial_flow_blend_floor,
         asked_at=asked_at,
     )
+    tuning = apply_tuning_adjustment(
+        profile=tuning_profile,
+        context=_tuning_context_for_row(
+            model_prob=model_prob,
+            sibling_prior=sibling_priors.get(condition_id),
+            smart_money=smart_money_row,
+            concentration=concentration_row,
+            resolution_risk=resolution_risk_row,
+            adversarial_flow=adversarial_flow_row,
+        ),
+        concentration_threshold=settings.holder_concentration_down_weight_threshold,
+    )
+    model_prob = tuning.tuned_probability
+    model_reasons.extend(tuning.reasons)
     driver_summaries, feature_attributions = _feature_attributions_for_sample(
         registry=registry,
         model_source=model_source,
@@ -975,15 +1498,37 @@ async def model_for_market(
             classification=classification,
             pipeline_result=pipeline_result,
             market_mid=yes_mid,
+            sibling_prior=sibling_priors.get(condition_id),
             feature_snapshot=feature_snapshot,
+            smart_money=smart_money_row,
+            concentration=concentration_row,
+            resolution_risk=resolution_risk_row,
+            adversarial_flow=adversarial_flow_row,
+            regime_label=regime_row.label if regime_row is not None else None,
+            onchain=onchain_context,
+            macro=macro_context,
+            concentration_threshold=settings.holder_concentration_down_weight_threshold,
             asked_at=asked_at,
         ),
     )
-    kelly_side, kelly_fraction, kelly_uncapped_fraction = _kelly_recommendation(
+    edge_bps = _edge_bps_with_resolution_risk(
         model_prob=model_prob,
         market_mid=yes_mid,
-        fractional_multiplier=settings.fractional_kelly_default,
-        cap=settings.kelly_cap_default,
+        resolution_risk=resolution_risk_row,
+        suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
+    )
+    if edge_bps is None:
+        kelly_side, kelly_fraction, kelly_uncapped_fraction = (None, None, None)
+    else:
+        kelly_side, kelly_fraction, kelly_uncapped_fraction = _kelly_recommendation(
+            model_prob=model_prob,
+            market_mid=yes_mid,
+            fractional_multiplier=settings.fractional_kelly_default,
+            cap=settings.kelly_cap_default,
+        )
+    resolution_risk_multiplier = _effective_resolution_risk_multiplier(
+        resolution_risk_row,
+        default=settings.resolution_risk_multiplier_default,
     )
     band_lo, band_hi, band_coverage, uncertainty_source = _apply_conformal_interval(
         registry=conformal_registry,
@@ -991,8 +1536,19 @@ async def model_for_market(
         model_prob=model_prob,
         time_to_resolution_s=time_to_resolution_s,
         uncertainty_multiplier=pipeline_result.baseline.uncertainty_multiplier,
-        resolution_risk_multiplier=settings.resolution_risk_multiplier_default,
+        resolution_risk_multiplier=resolution_risk_multiplier,
+        regime=regime_row.label if regime_row is not None else None,
     )
+    if resolution_risk_row is not None and resolution_risk_row.is_flagged:
+        model_reasons.append(
+            f"Resolution-risk {resolution_risk_row.risk_level}; uncertainty widened"
+        )
+    if adversarial_flow_row.is_flagged:
+        model_reasons.append("Adversarial-flow risk elevated; ensemble refinement down-weighted")
+    if adversarial_flow_row.thin_book:
+        model_reasons.append("thin_book: top-of-book depth below threshold")
+    if edge_bps is None:
+        model_reasons.append("edge suppressed: high resolution risk")
     return MarketModelDetail(
         condition_id=condition_id,
         question=str(snap["question"]),
@@ -1005,13 +1561,16 @@ async def model_for_market(
         model_source=model_source,
         refinement_source=refinement_source,
         baseline_source=str(pipeline_result.displayed_source.value),
-        edge_bps=_edge_bps(model_prob, yes_mid),
+        tuning_profile=tuning_profile.name if tuning_profile is not None else None,
+        tuning_preset=tuning_profile.preset if tuning_profile is not None else None,
+        tuning_log_odds_shift=tuning.total_log_odds_shift,
+        edge_bps=edge_bps,
         uncertainty_multiplier=pipeline_result.baseline.uncertainty_multiplier,
         band_lo=band_lo,
         band_hi=band_hi,
         band_coverage=band_coverage,
         uncertainty_source=uncertainty_source,
-        resolution_risk_multiplier=settings.resolution_risk_multiplier_default,
+        resolution_risk_multiplier=resolution_risk_multiplier,
         kelly_side=kelly_side,
         kelly_fraction=kelly_fraction,
         kelly_uncapped_fraction=kelly_uncapped_fraction,
@@ -1022,6 +1581,53 @@ async def model_for_market(
         classifier_reasons=list(classification.reasons),
         driver_summaries=driver_summaries,
         feature_attributions=feature_attributions,
+        smart_money_consensus=(
+            smart_money_row.consensus_score if smart_money_row is not None else None
+        ),
+        smart_money_sample_wallets=(
+            smart_money_row.sample_wallets if smart_money_row is not None else None
+        ),
+        smart_money_dominant=(
+            smart_money_row.dominant_outcome if smart_money_row is not None else None
+        ),
+        concentration_score=_concentration_score(concentration_row),
+        concentration_whale_flag=(
+            concentration_row.any_whale_flag if concentration_row is not None else None
+        ),
+        concentration_yes_top1_pct=(
+            concentration_row.yes_top1_pct if concentration_row is not None else None
+        ),
+        concentration_no_top1_pct=(
+            concentration_row.no_top1_pct if concentration_row is not None else None
+        ),
+        resolution_risk_score=(
+            resolution_risk_row.risk_score if resolution_risk_row is not None else None
+        ),
+        resolution_risk_level=(
+            resolution_risk_row.risk_level if resolution_risk_row is not None else None
+        ),
+        resolution_risk_flagged=(
+            resolution_risk_row.is_flagged if resolution_risk_row is not None else False
+        ),
+        resolution_risk_reasons=(
+            list(resolution_risk_row.reasons) if resolution_risk_row is not None else []
+        ),
+        adversarial_flow_score=adversarial_flow_row.score,
+        adversarial_flow_flagged=adversarial_flow_row.is_flagged,
+        adversarial_flow_reasons=list(adversarial_flow_row.reasons),
+        thin_book=adversarial_flow_row.thin_book,
+        regime_label=regime_row.label if regime_row is not None else None,
+        regime_confidence=regime_row.confidence if regime_row is not None else None,
+        regime_classifier=regime_row.classifier if regime_row is not None else None,
+        regime_observed_at=regime_row.observed_at if regime_row is not None else None,
+        model_disabled=disable_status.is_disabled if disable_status is not None else False,
+        model_disabled_reason=disable_status.reason if disable_status is not None else None,
+        model_disabled_consecutive_days=(
+            disable_status.consecutive_days if disable_status is not None else None
+        ),
+        model_disabled_observed_at=(
+            disable_status.observed_at if disable_status is not None else None
+        ),
     )
 
 
@@ -1032,6 +1638,7 @@ async def history_for_market(
     asked_at: datetime,
     window_hours: int = 24 * 7,
     max_points: int = 96,
+    tuning_profile: TuningProfile | None = None,
 ) -> list[MarketHistoryPoint]:
     snapshot = await asof_q.latest_market_snapshot_asof(ch, condition_id, asked_at)
     if snapshot is None or not snapshot.token_ids:
@@ -1051,7 +1658,12 @@ async def history_for_market(
     sampled_rows = _sample_history_rows(quote_rows, max_points=max_points)
     history: list[MarketHistoryPoint] = []
     for row in sampled_rows:
-        detail = await model_for_market(ch, condition_id=condition_id, asked_at=row.event_time)
+        detail = await model_for_market(
+            ch,
+            condition_id=condition_id,
+            asked_at=row.event_time,
+            tuning_profile=tuning_profile,
+        )
         history.append(
             MarketHistoryPoint(
                 event_time=row.event_time,

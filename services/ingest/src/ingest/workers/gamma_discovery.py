@@ -14,7 +14,7 @@ import hashlib
 import logging
 
 import structlog
-from model import classify
+from model import classify, score_resolution_risk
 from polymarket_client import Market, PolymarketClient
 
 from ..clickhouse import get_async_client
@@ -25,8 +25,10 @@ from ..settings import get_settings
 from ..writers import (
     CLASSIFICATIONS_COLS,
     MARKETS_COLS,
+    RESOLUTION_RISK_COLS,
     classification_row,
     market_row,
+    resolution_risk_row,
     utcnow,
 )
 
@@ -69,12 +71,28 @@ def _multi_outcome_sibling_counts(markets: list[Market]) -> dict[str, int]:
     return counts
 
 
+def _resolution_risk_fingerprint(
+    *,
+    risk_score: float,
+    risk_level: str,
+    is_flagged: bool,
+    risk_multiplier: float,
+    reasons: list[str],
+) -> str:
+    payload = (
+        f"{risk_score:.3f}|{risk_level}|{int(is_flagged)}|{risk_multiplier:.3f}|"
+        f"{'|'.join(reasons)}"
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 async def run_once(
     pm: PolymarketClient,
     registry: MarketsRegistry,
     *,
     page_size: int = 100,
     classification_cache: dict[str, str] | None = None,
+    resolution_risk_cache: dict[str, str] | None = None,
 ) -> int:
     """One discovery pass. Returns the number of markets upserted.
 
@@ -83,6 +101,7 @@ async def run_once(
     """
     ch = await get_async_client()
     cache = classification_cache if classification_cache is not None else {}
+    risk_cache = resolution_risk_cache if resolution_risk_cache is not None else {}
     try:
         all_markets: dict[str, Market] = {}
         for tag in TAG_SLUGS:
@@ -113,6 +132,7 @@ async def run_once(
         # distinguish "which/who wins?" event groups from ordinary binaries.
         sibling_counts = _multi_outcome_sibling_counts(list(all_markets.values()))
         classification_rows: list[tuple[object, ...]] = []
+        resolution_risk_rows: list[tuple[object, ...]] = []
         for m in all_markets.values():
             result = classify(
                 question=m.question,
@@ -135,22 +155,50 @@ async def run_once(
                 event_family=f.event_family,
             )
             if cache.get(m.condition_id) == digest:
+                pass
+            else:
+                cache[m.condition_id] = digest
+                classification_rows.append(
+                    classification_row(
+                        condition_id=m.condition_id,
+                        market_type=result.market_type.value,
+                        confidence=result.confidence,
+                        needs_review=result.needs_review,
+                        asset=f.asset,
+                        strike=f.strike,
+                        range_low=f.range_low,
+                        range_high=f.range_high,
+                        direction=f.direction,
+                        event_family=f.event_family,
+                        resolution_date=f.resolution_date,
+                        reasons=result.reasons,
+                        observed_at=now,
+                    )
+                )
+            risk = score_resolution_risk(
+                question=m.question,
+                description=m.description,
+                resolution_source=m.resolution_source,
+            )
+            risk_digest = _resolution_risk_fingerprint(
+                risk_score=risk.score,
+                risk_level=risk.level,
+                is_flagged=risk.is_flagged,
+                risk_multiplier=risk.multiplier,
+                reasons=risk.reasons,
+            )
+            if risk_cache.get(m.condition_id) == risk_digest:
                 continue
-            cache[m.condition_id] = digest
-            classification_rows.append(
-                classification_row(
+            risk_cache[m.condition_id] = risk_digest
+            resolution_risk_rows.append(
+                resolution_risk_row(
                     condition_id=m.condition_id,
-                    market_type=result.market_type.value,
-                    confidence=result.confidence,
-                    needs_review=result.needs_review,
-                    asset=f.asset,
-                    strike=f.strike,
-                    range_low=f.range_low,
-                    range_high=f.range_high,
-                    direction=f.direction,
-                    event_family=f.event_family,
-                    resolution_date=f.resolution_date,
-                    reasons=result.reasons,
+                    risk_score=risk.score,
+                    risk_level=risk.level,
+                    is_flagged=risk.is_flagged,
+                    risk_multiplier=risk.multiplier,
+                    classifier=risk.classifier,
+                    reasons=risk.reasons,
                     observed_at=now,
                 )
             )
@@ -159,6 +207,12 @@ async def run_once(
                 "market_classifications",
                 classification_rows,
                 column_names=CLASSIFICATIONS_COLS,
+            )
+        if resolution_risk_rows:
+            await ch.insert(
+                "market_resolution_risk",
+                resolution_risk_rows,
+                column_names=RESOLUTION_RISK_COLS,
             )
 
         refs = [
@@ -177,6 +231,7 @@ async def run_once(
             "gamma.discovery.done",
             markets=len(refs),
             classifications_written=len(classification_rows),
+            resolution_risk_written=len(resolution_risk_rows),
         )
         return len(refs)
     finally:
@@ -188,6 +243,7 @@ async def run_forever() -> None:
     s = get_settings()
     registry = MarketsRegistry()
     classification_cache: dict[str, str] = {}
+    resolution_risk_cache: dict[str, str] = {}
     ch_for_health = await get_async_client()
     health = HealthSink(ch_for_health)
     dlq = DeadLetterQueue(s.redis_url, stream="gamma_discovery")
@@ -200,7 +256,12 @@ async def run_forever() -> None:
         ) as pm:
             while True:
                 try:
-                    await run_once(pm, registry, classification_cache=classification_cache)
+                    await run_once(
+                        pm,
+                        registry,
+                        classification_cache=classification_cache,
+                        resolution_risk_cache=resolution_risk_cache,
+                    )
                 except Exception as exc:
                     log.error("gamma.discovery.failed", error=repr(exc))
                     await dlq.push(

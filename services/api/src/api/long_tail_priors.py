@@ -57,7 +57,7 @@ async def load_long_tail_resolved_markets(
             FROM market_resolutions
             WHERE resolved_outcome IN ('YES', 'NO')
               AND observed_at <= {asof:DateTime64(3)}
-            ORDER BY condition_id, observed_at DESC
+            ORDER BY condition_id, observed_at ASC
             LIMIT 1 BY condition_id
         ) AS res
         INNER JOIN (

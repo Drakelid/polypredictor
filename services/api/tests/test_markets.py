@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
+from api.adversarial_flow import AdversarialFlowContext
 from api.asof import MarketSnapshotRow, QuoteRow
 from api.discrete_inputs import DiscreteBaselineRecord
 from api.features import FeatureSnapshotRow
@@ -16,11 +17,13 @@ from api.markets import (
     _apply_ensemble_refinement,
     _baseline_inputs_for,
     _build_multi_outcome_contexts,
+    _edge_bps_with_resolution_risk,
     _feature_attributions_for_sample,
     _kelly_recommendation,
     _sample_history_rows,
     history_for_market,
 )
+from api.resolution_risk import ResolutionRiskRow
 from model import (
     BOOSTER_FEATURE_NAMES,
     BaselineOutput,
@@ -374,7 +377,13 @@ def test_apply_ensemble_refinement_uses_registry_and_feature_snapshot() -> None:
         classification=classification,
         pipeline_result=pipeline_result,
         market_mid=0.39,
+        sibling_prior=None,
         feature_snapshot=feature_snapshot,
+        smart_money=None,
+        concentration=None,
+        adversarial_flow=None,
+        concentration_threshold=0.6,
+        adversarial_flow_blend_floor=0.25,
         asked_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
     )
 
@@ -382,6 +391,109 @@ def test_apply_ensemble_refinement_uses_registry_and_feature_snapshot() -> None:
     assert refinement_source == "per_type_ensemble_v1"
     assert model_prob == pytest.approx(0.35)
     assert model_reasons[0] == "Per-type ensemble refinement over bs_one_touch"
+
+
+def test_apply_ensemble_refinement_uses_regime_feature_when_available() -> None:
+    classification = type("ClsRow", (), {"market_type": MarketType.THRESHOLD})()
+    pipeline_result = PipelineResult(
+        classification=ClassificationResult(
+            market_type=MarketType.THRESHOLD,
+            confidence=0.9,
+            features=MarketFeatures(asset="BTC", strike=150_000, direction="above"),
+            reasons=["threshold"],
+        ),
+        baseline=BaselineOutput(
+            probability=0.50,
+            source=BaselineSource.BS_ONE_TOUCH,
+            reasons=["threshold baseline"],
+        ),
+        displayed_probability=0.50,
+        displayed_source=BaselineSource.BS_ONE_TOUCH,
+        _mid=0.50,
+    )
+    feature_snapshot = FeatureSnapshotRow(
+        condition_id="cond-1",
+        token_id="tok-yes",
+        mid=0.50,
+        spread=0.02,
+        book_imbalance_1pct=0.0,
+        book_imbalance_5pct=0.0,
+        momentum_1h=0.0,
+        momentum_24h=0.0,
+        momentum_7d=0.0,
+        realized_vol_24h=0.45,
+        informed_taker_flow_24h=0.0,
+        passive_maker_flow_24h=0.0,
+        decayed_directional_flow_24h=0.0,
+        event_time=datetime(2026, 4, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+    booster_means = {name: 0.0 for name in BOOSTER_FEATURE_NAMES}
+    booster_scales = {name: 1.0 for name in BOOSTER_FEATURE_NAMES}
+    registry = EnsembleRegistry.from_dict(
+        {
+            "models": {
+                "threshold": {
+                    "market_type": "threshold",
+                    "linear_means": {"p_base_logit": 0.0, "market_mid_logit": 0.0},
+                    "linear_scales": {"p_base_logit": 1.0, "market_mid_logit": 1.0},
+                    "booster_means": booster_means,
+                    "booster_scales": booster_scales,
+                    "linear_intercept": 0.0,
+                    "linear_weights": {"p_base_logit": 0.0, "market_mid_logit": 0.0},
+                    "stumps": [
+                        {
+                            "feature_name": "regime_bull_trend",
+                            "threshold": 0.5,
+                            "left_value": -1.0,
+                            "right_value": 1.0,
+                        }
+                    ],
+                    "calibrator": {
+                        "upper_bounds": [0.5, 1.0],
+                        "values": [0.25, 0.75],
+                    },
+                    "market_mid_weight_cap": 0.35,
+                }
+            }
+        }
+    )
+
+    bull_prob, bull_source, bull_refinement, _ = _apply_ensemble_refinement(
+        registry=registry,
+        classification=classification,
+        pipeline_result=pipeline_result,
+        market_mid=0.50,
+        sibling_prior=None,
+        feature_snapshot=feature_snapshot,
+        smart_money=None,
+        concentration=None,
+        adversarial_flow=None,
+        regime_label="bull_trend",
+        concentration_threshold=0.6,
+        adversarial_flow_blend_floor=0.25,
+        asked_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+    bear_prob, _, _, _ = _apply_ensemble_refinement(
+        registry=registry,
+        classification=classification,
+        pipeline_result=pipeline_result,
+        market_mid=0.50,
+        sibling_prior=None,
+        feature_snapshot=feature_snapshot,
+        smart_money=None,
+        concentration=None,
+        adversarial_flow=None,
+        regime_label="bear_trend",
+        concentration_threshold=0.6,
+        adversarial_flow_blend_floor=0.25,
+        asked_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+
+    assert bull_source == "ensemble"
+    assert bull_refinement == "per_type_ensemble_v1"
+    assert bull_prob is not None and bear_prob is not None
+    assert bull_prob > bear_prob
 
 
 def test_apply_ensemble_refinement_falls_back_without_feature_snapshot() -> None:
@@ -408,7 +520,13 @@ def test_apply_ensemble_refinement_falls_back_without_feature_snapshot() -> None
         classification=classification,
         pipeline_result=pipeline_result,
         market_mid=0.39,
+        sibling_prior=None,
         feature_snapshot=None,
+        smart_money=None,
+        concentration=None,
+        adversarial_flow=None,
+        concentration_threshold=0.6,
+        adversarial_flow_blend_floor=0.25,
         asked_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
     )
 
@@ -416,6 +534,103 @@ def test_apply_ensemble_refinement_falls_back_without_feature_snapshot() -> None
     assert model_source == "baseline"
     assert refinement_source is None
     assert model_reasons[-1] == "ensemble skipped: no persisted feature snapshot"
+
+
+def test_edge_bps_with_resolution_risk_suppresses_high_risk_edges() -> None:
+    risk = ResolutionRiskRow(
+        condition_id="cond-1",
+        risk_score=0.82,
+        risk_level="high",
+        is_flagged=True,
+        risk_multiplier=1.66,
+        classifier="heuristic_v1",
+        reasons=["subjective threshold language"],
+        event_time=datetime(2026, 4, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+
+    suppressed = _edge_bps_with_resolution_risk(
+        model_prob=0.62,
+        market_mid=0.51,
+        resolution_risk=risk,
+        suppress_threshold=0.75,
+    )
+    unsuppressed = _edge_bps_with_resolution_risk(
+        model_prob=0.62,
+        market_mid=0.51,
+        resolution_risk=risk,
+        suppress_threshold=0.9,
+    )
+
+    assert suppressed is None
+    assert unsuppressed == pytest.approx(1100.0)
+
+
+def test_apply_ensemble_refinement_downweights_adversarial_flow() -> None:
+    classification = type("ClsRow", (), {"market_type": MarketType.THRESHOLD})()
+    pipeline_result = PipelineResult(
+        classification=ClassificationResult(
+            market_type=MarketType.THRESHOLD,
+            confidence=0.9,
+            features=MarketFeatures(asset="BTC", strike=150_000, direction="above"),
+            reasons=["threshold"],
+        ),
+        baseline=BaselineOutput(
+            probability=0.42,
+            source=BaselineSource.BS_ONE_TOUCH,
+            reasons=["threshold baseline"],
+        ),
+        displayed_probability=0.42,
+        displayed_source=BaselineSource.BS_ONE_TOUCH,
+        _mid=0.39,
+    )
+    feature_snapshot = FeatureSnapshotRow(
+        condition_id="cond-1",
+        token_id="tok-yes",
+        mid=0.39,
+        spread=0.03,
+        book_imbalance_1pct=0.2,
+        book_imbalance_5pct=0.15,
+        momentum_1h=0.02,
+        momentum_24h=0.04,
+        momentum_7d=0.06,
+        realized_vol_24h=0.45,
+        informed_taker_flow_24h=0.12,
+        passive_maker_flow_24h=-0.03,
+        decayed_directional_flow_24h=0.08,
+        event_time=datetime(2026, 4, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+
+    model_prob, model_source, refinement_source, model_reasons = _apply_ensemble_refinement(
+        registry=_ensemble_registry_payload(),
+        classification=classification,
+        pipeline_result=pipeline_result,
+        market_mid=0.39,
+        sibling_prior=None,
+        feature_snapshot=feature_snapshot,
+        smart_money=None,
+        concentration=None,
+        adversarial_flow=AdversarialFlowContext(
+            condition_id="cond-1",
+            score=0.8,
+            is_flagged=True,
+            thin_book=True,
+            top_book_depth_usdc=350.0,
+            flow_strength=0.55,
+            external_divergence_count=1,
+            external_event_count=0,
+            reasons=["large directional flow"],
+        ),
+        concentration_threshold=0.6,
+        adversarial_flow_blend_floor=0.25,
+        asked_at=datetime(2026, 4, 22, 12, tzinfo=UTC),
+    )
+
+    assert model_source == "ensemble"
+    assert refinement_source == "per_type_ensemble_v1"
+    assert model_prob == pytest.approx(0.4025)
+    assert model_reasons[-1] == "Adversarial-flow guard applied; ensemble delta scaled to 0.25"
 
 
 def test_feature_attributions_for_sample_returns_ranked_driver_summaries() -> None:
@@ -513,6 +728,8 @@ async def test_history_for_market_replays_model_at_sampled_points(monkeypatch: p
         return MarketSnapshotRow(
             condition_id=condition_id,
             question="Will BTC rise?",
+            description="",
+            resolution_source="",
             active=True,
             closed=False,
             volume_usdc=1000.0,
@@ -527,7 +744,8 @@ async def test_history_for_market_replays_model_at_sampled_points(monkeypatch: p
     async def fake_quotes_pit(ch, token_id, start, end):
         return quote_rows
 
-    async def fake_model_for_market(ch, *, condition_id, asked_at):
+    async def fake_model_for_market(ch, *, condition_id, asked_at, tuning_profile=None):
+        del tuning_profile
         idx = next(i for i, row in enumerate(quote_rows) if row.event_time == asked_at)
         return type("Detail", (), {"model_prob": 0.45 + idx * 0.05})()
 

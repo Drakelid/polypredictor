@@ -20,6 +20,7 @@ def _sample(
     spread: float | None = 0.02,
     book_imbalance_1pct: float | None = None,
     book_imbalance_5pct: float | None = None,
+    regime_label: str | None = None,
 ) -> EnsembleSample:
     return EnsembleSample(
         market_type=market_type,
@@ -37,6 +38,7 @@ def _sample(
         informed_taker_flow_24h=book_imbalance_1pct,
         passive_maker_flow_24h=book_imbalance_5pct,
         decayed_directional_flow_24h=book_imbalance_1pct,
+        regime_label=regime_label,
     )
 
 
@@ -232,3 +234,62 @@ def test_explain_prediction_returns_ranked_feature_contributions() -> None:
     scores = [abs(item.score_contribution) for item in explanation.contributions]
     assert scores == sorted(scores, reverse=True)
     assert any(item.feature_name == "book_imbalance_1pct" for item in explanation.contributions)
+
+
+def test_boosted_stumps_can_learn_regime_signal() -> None:
+    samples = []
+    for idx in range(64):
+        regime_label = "bull_trend" if idx % 2 == 0 else "bear_trend"
+        samples.append(
+            _sample(
+                market_type=MarketType.THRESHOLD,
+                outcome=1 if regime_label == "bull_trend" else 0,
+                asked_at=float(idx),
+                p_base=0.5,
+                market_mid=0.5,
+                book_imbalance_1pct=0.0,
+                book_imbalance_5pct=0.0,
+                spread=0.01,
+                regime_label=regime_label,
+            )
+        )
+
+    registry = fit_per_type_ensembles(
+        samples,
+        n_estimators=12,
+        learning_rate=0.3,
+        min_samples_leaf=4,
+        min_calibration_size=8,
+    )
+    model = registry.model_for_type(MarketType.THRESHOLD)
+
+    assert model is not None
+    assert any(stump.feature_name.startswith("regime_") for stump in model.stumps)
+
+    bull = model.predict_raw_probability(
+        _sample(
+            market_type=MarketType.THRESHOLD,
+            outcome=1,
+            asked_at=100.0,
+            p_base=0.5,
+            market_mid=0.5,
+            book_imbalance_1pct=0.0,
+            book_imbalance_5pct=0.0,
+            regime_label="bull_trend",
+        )
+    )
+    bear = model.predict_raw_probability(
+        _sample(
+            market_type=MarketType.THRESHOLD,
+            outcome=0,
+            asked_at=101.0,
+            p_base=0.5,
+            market_mid=0.5,
+            book_imbalance_1pct=0.0,
+            book_imbalance_5pct=0.0,
+            regime_label="bear_trend",
+        )
+    )
+
+    assert bull is not None and bear is not None
+    assert bull > bear

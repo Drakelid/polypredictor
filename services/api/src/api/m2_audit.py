@@ -193,7 +193,7 @@ async def latest_binary_resolutions(
         SELECT condition_id, resolved_outcome, event_time
         FROM market_resolutions
         WHERE {where}
-        ORDER BY condition_id, observed_at DESC
+        ORDER BY condition_id, observed_at ASC
         LIMIT 1 BY condition_id
         ORDER BY event_time DESC
         LIMIT {{limit:UInt32}}

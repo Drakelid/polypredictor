@@ -46,6 +46,7 @@ async def test_load_long_tail_resolved_markets_shapes_rows() -> None:
     assert rows[0].outcome == 1
     assert rows[1].outcome == 0
     assert "market_resolutions" in ch.queries[0]
+    assert "ORDER BY condition_id, observed_at ASC" in ch.queries[0]
 
 
 def test_long_tail_prior_context_prefers_analog_similarity_then_base_rate() -> None:

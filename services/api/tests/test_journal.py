@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 import pytest
 from api.journal import (
     JournalCall,
+    JournalResolutionSync,
     _brier_contribution,
     _confidence_buckets,
+    _directional_fill_call,
     _pnl_usdc,
     summary,
 )
@@ -99,6 +101,22 @@ def test_confidence_buckets_group_by_call_side_probability() -> None:
     assert seventy_bucket["hit_rate"] == pytest.approx(1.0)
 
 
+def test_directional_fill_call_maps_sell_yes_to_no() -> None:
+    directional = _directional_fill_call(
+        token_ids=["tok-yes", "tok-no"],
+        token_id="tok-yes",
+        side="SELL",
+        price=0.63,
+        size=100.0,
+    )
+
+    assert directional is not None
+    assert directional["outcome"] == "NO"
+    assert directional["token_id"] == "tok-no"
+    assert directional["entry_price"] == pytest.approx(0.37)
+    assert directional["size_usdc"] == pytest.approx(63.0)
+
+
 @pytest.mark.asyncio
 async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = [
@@ -134,7 +152,11 @@ async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch
     async def fake_list_calls(*, pool, ch, settings):
         return calls
 
+    async def fake_resolution_sync(**_: object) -> None:
+        return None
+
     monkeypatch.setattr("api.journal.list_calls", fake_list_calls)
+    monkeypatch.setattr("api.journal._journal_resolution_sync", fake_resolution_sync)
 
     report = await summary(pool=object(), ch=object(), settings=object())  # type: ignore[arg-type]
 
@@ -145,3 +167,32 @@ async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch
     assert report.avg_brier == pytest.approx(0.10)
     assert report.best_calls[0].id == "a"
     assert len(report.edge_scatter) == 2
+    assert report.resolution_sync is None
+
+
+@pytest.mark.asyncio
+async def test_summary_includes_resolution_sync_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_list_calls(*, pool, ch, settings):
+        return []
+
+    async def fake_resolution_sync(*, pool, settings):
+        del pool, settings
+        return JournalResolutionSync(
+            proxy_wallet="0xabcdefabcdefabcdefabcdefabcdefabcdef1234",
+            verified_at=datetime(2026, 4, 24, 12, tzinfo=UTC),
+            open_positions=4,
+            redeemable_positions=2,
+            total_position_value_usdc=250.0,
+            total_earnings_usdc=18.5,
+        )
+
+    monkeypatch.setattr("api.journal.list_calls", fake_list_calls)
+    monkeypatch.setattr("api.journal._journal_resolution_sync", fake_resolution_sync)
+
+    report = await summary(pool=object(), ch=object(), settings=object())  # type: ignore[arg-type]
+
+    assert report.resolution_sync is not None
+    assert report.resolution_sync.redeemable_positions == 2
+    assert report.resolution_sync.total_earnings_usdc == pytest.approx(18.5)

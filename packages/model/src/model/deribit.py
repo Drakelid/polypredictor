@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
 import structlog
@@ -35,6 +36,21 @@ class DeribitIV:
     strike_iv: float           # decimal, interpolated at the requested strike
     atm_instrument: str
     strike_instrument: str
+
+
+@dataclass(frozen=True)
+class DeribitTermStructurePoint:
+    currency: str
+    expiry_date: datetime
+    expiry_days: float
+    underlying_price: float
+    atm_iv: float
+    call_otm_iv: float | None
+    put_otm_iv: float | None
+    strike_skew: float | None
+    atm_instrument: str
+    call_otm_instrument: str | None
+    put_otm_instrument: str | None
 
 
 class DeribitClient:
@@ -126,6 +142,95 @@ class DeribitClient:
             atm_instrument=str(atm_row.get("instrument_name", "")),
             strike_instrument=str(strike_row.get("instrument_name", "")),
         )
+
+    async def fetch_term_structure(
+        self,
+        *,
+        currency: str,
+    ) -> list[DeribitTermStructurePoint]:
+        rows = await self._book_summary(currency.upper())
+        if not isinstance(rows, list) or not rows:
+            return []
+        index_price = _first_float(rows, "underlying_price")
+        if index_price is None or index_price <= 0:
+            return []
+
+        grouped: dict[int, list[dict[str, object]]] = {}
+        for row in rows:
+            info = _parse_instrument(str(row.get("instrument_name", "")))
+            expiry_ts = info.get("expiry_ts")
+            if not isinstance(expiry_ts, int):
+                continue
+            grouped.setdefault(expiry_ts, []).append(row)
+
+        out: list[DeribitTermStructurePoint] = []
+        for expiry_ts, same_expiry in sorted(grouped.items()):
+            expiry_dt = _expiry_datetime(expiry_ts)
+            if expiry_dt is None:
+                continue
+            expiry_days = _expiry_days_from_ts(expiry_ts)
+            if expiry_days is None:
+                continue
+
+            atm_row = min(
+                same_expiry,
+                key=lambda row: abs(
+                    _parse_instrument(row.get("instrument_name", "")).get("strike", 0)
+                    - index_price
+                ),
+            )
+            atm_iv_pct = _mark_iv(atm_row)
+            if atm_iv_pct is None:
+                continue
+
+            call_otm = _nearest_otm_row(
+                same_expiry,
+                index_price=index_price,
+                kind="C",
+            )
+            put_otm = _nearest_otm_row(
+                same_expiry,
+                index_price=index_price,
+                kind="P",
+            )
+            call_otm_iv = _mark_iv(call_otm) if call_otm is not None else None
+            put_otm_iv = _mark_iv(put_otm) if put_otm is not None else None
+            strike_skew = None
+            if call_otm_iv is not None and put_otm_iv is not None:
+                strike_skew = (call_otm_iv - put_otm_iv) / 100.0
+
+            out.append(
+                DeribitTermStructurePoint(
+                    currency=currency.upper(),
+                    expiry_date=expiry_dt,
+                    expiry_days=expiry_days,
+                    underlying_price=float(index_price),
+                    atm_iv=float(atm_iv_pct) / 100.0,
+                    call_otm_iv=(
+                        float(call_otm_iv) / 100.0
+                        if call_otm_iv is not None
+                        else None
+                    ),
+                    put_otm_iv=(
+                        float(put_otm_iv) / 100.0
+                        if put_otm_iv is not None
+                        else None
+                    ),
+                    strike_skew=strike_skew,
+                    atm_instrument=str(atm_row.get("instrument_name", "")),
+                    call_otm_instrument=(
+                        str(call_otm.get("instrument_name", ""))
+                        if call_otm is not None
+                        else None
+                    ),
+                    put_otm_instrument=(
+                        str(put_otm.get("instrument_name", ""))
+                        if put_otm is not None
+                        else None
+                    ),
+                )
+            )
+        return out
 
     async def _book_summary(self, currency: str) -> list[dict[str, object]]:
         cached = self._book_summary_cache.get(currency)
@@ -250,9 +355,6 @@ def _pick_nearest_expiry(
     epoch, we convert back to "days from now" by a best-effort heuristic —
     the exact number matters less than picking the right bucket.
     """
-    from datetime import UTC, datetime
-
-    today = datetime.now(tz=UTC)
     seen: dict[int, int] = {}
     for r in rows:
         info = _parse_instrument(str(r.get("instrument_name", "")))
@@ -265,13 +367,9 @@ def _pick_nearest_expiry(
     # month would bake in ~70 because of the tens-digit. Convert via datetime.
     ranked = []
     for ts in seen:
-        year, rest = divmod(ts, 10_000)
-        month, day = divmod(rest, 100)
-        try:
-            expiry_dt = datetime(year, month, day, tzinfo=UTC)
-        except ValueError:
+        days = _expiry_days_from_ts(ts)
+        if days is None:
             continue
-        days = (expiry_dt - today).total_seconds() / 86_400
         ranked.append((ts, days))
     if not ranked:
         return None
@@ -279,6 +377,47 @@ def _pick_nearest_expiry(
     if on_or_after:
         return min(on_or_after, key=lambda x: x[1])
     return max(ranked, key=lambda x: x[1])
+
+
+def _nearest_otm_row(
+    rows: list[dict[str, object]],
+    *,
+    index_price: float,
+    kind: str,
+) -> dict[str, object] | None:
+    candidates: list[tuple[float, dict[str, object]]] = []
+    for row in rows:
+        info = _parse_instrument(str(row.get("instrument_name", "")))
+        strike = info.get("strike")
+        row_kind = info.get("kind")
+        if not isinstance(strike, float) or row_kind != kind:
+            continue
+        if kind == "C" and strike <= index_price:
+            continue
+        if kind == "P" and strike >= index_price:
+            continue
+        candidates.append((abs(strike - index_price), row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def _expiry_datetime(expiry_ts: int) -> datetime | None:
+    year, rest = divmod(expiry_ts, 10_000)
+    month, day = divmod(rest, 100)
+    try:
+        return datetime(year, month, day, tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _expiry_days_from_ts(expiry_ts: int) -> float | None:
+    expiry_dt = _expiry_datetime(expiry_ts)
+    if expiry_dt is None:
+        return None
+    today = datetime.now(tz=UTC)
+    return (expiry_dt - today).total_seconds() / 86_400
 
 
 def _latest_historical_vol_pct(rows: object) -> float | None:

@@ -27,7 +27,11 @@ from .types import MarketType
 
 _EPS = 1e-6
 
-LINEAR_FEATURE_NAMES = ("p_base_logit", "market_mid_logit")
+LINEAR_FEATURE_NAMES = (
+    "p_base_logit",
+    "market_mid_logit",
+    "sibling_implied_prior_logit",
+)
 BOOSTER_FEATURE_NAMES = (
     "spread",
     "book_imbalance_1pct",
@@ -39,6 +43,39 @@ BOOSTER_FEATURE_NAMES = (
     "informed_taker_flow_24h",
     "passive_maker_flow_24h",
     "decayed_directional_flow_24h",
+    # M3.1 smart-money + M3.2 concentration features. The PRD calls for
+    # down-weighting smart_money_consensus when concentration > 0.6; we apply
+    # that in the API layer (services/api/src/api/markets.py) before building
+    # the sample, so the model sees a pre-attenuated consensus value and the
+    # linear stack does not have to learn the interaction.
+    "smart_money_consensus",
+    "holder_concentration",
+    "resolution_risk_score",
+    "adversarial_flow_score",
+    "regime_bull_trend",
+    "regime_bear_trend",
+    "regime_chop",
+    "regime_liquidity_crisis",
+    # M5 onchain — z-scores / pct deltas, see services/api/src/api/onchain_features.py.
+    # Legacy registries that pre-date these names train no stumps for them, so
+    # serve-time predictions on older registries are unaffected.
+    "onchain_exchange_inflow_z",
+    "onchain_exchange_outflow_z",
+    "onchain_whale_count_delta_pct",
+    "onchain_stablecoin_supply_delta_pct",
+    # M5 macro — FRED-derived scalars, see services/api/src/api/macro_features.py.
+    # Asset-agnostic; same value applies to every market in a request.
+    "macro_fed_funds_30d_delta",
+    "macro_treasury_10y_30d_delta",
+    "macro_yield_curve_2s10s",
+    "macro_cpi_yoy_pct",
+)
+
+REGIME_FEATURE_NAMES = (
+    "regime_bull_trend",
+    "regime_bear_trend",
+    "regime_chop",
+    "regime_liquidity_crisis",
 )
 
 
@@ -47,6 +84,7 @@ class EnsembleSample:
     market_type: MarketType
     p_base: float
     market_mid: float | None = None
+    sibling_implied_prior: float | None = None
     spread: float | None = None
     book_imbalance_1pct: float | None = None
     book_imbalance_5pct: float | None = None
@@ -57,6 +95,19 @@ class EnsembleSample:
     informed_taker_flow_24h: float | None = None
     passive_maker_flow_24h: float | None = None
     decayed_directional_flow_24h: float | None = None
+    smart_money_consensus: float | None = None
+    holder_concentration: float | None = None
+    resolution_risk_score: float | None = None
+    adversarial_flow_score: float | None = None
+    regime_label: str | None = None
+    onchain_exchange_inflow_z: float | None = None
+    onchain_exchange_outflow_z: float | None = None
+    onchain_whale_count_delta_pct: float | None = None
+    onchain_stablecoin_supply_delta_pct: float | None = None
+    macro_fed_funds_30d_delta: float | None = None
+    macro_treasury_10y_30d_delta: float | None = None
+    macro_yield_curve_2s10s: float | None = None
+    macro_cpi_yoy_pct: float | None = None
     outcome: int | None = None
     asked_at: float = 0.0
 
@@ -642,6 +693,14 @@ def _feature_value(sample: EnsembleSample, feature_name: str) -> float | None:
         return float(sample.p_base)
     if feature_name == "market_mid_logit":
         return float(sample.market_mid) if sample.market_mid is not None else None
+    if feature_name == "sibling_implied_prior_logit":
+        return (
+            float(sample.sibling_implied_prior)
+            if sample.sibling_implied_prior is not None
+            else None
+        )
+    if feature_name in REGIME_FEATURE_NAMES:
+        return _regime_indicator(sample.regime_label, feature_name)
     value = getattr(sample, feature_name)
     return float(value) if value is not None else None
 
@@ -651,6 +710,10 @@ def _raw_feature_value(sample: EnsembleSample, feature_name: str) -> float | Non
         return _safe_logit(sample.p_base)
     if feature_name == "market_mid_logit":
         return _safe_logit(sample.market_mid)
+    if feature_name == "sibling_implied_prior_logit":
+        return _safe_logit(sample.sibling_implied_prior)
+    if feature_name in REGIME_FEATURE_NAMES:
+        return _regime_indicator(sample.regime_label, feature_name)
     value = getattr(sample, feature_name)
     return float(value) if value is not None else None
 
@@ -679,6 +742,11 @@ def _safe_logit(probability: float | None) -> float | None:
         return None
     clipped = _clip_probability(probability)
     return math.log(clipped / (1.0 - clipped))
+
+
+def _regime_indicator(regime_label: str | None, feature_name: str) -> float:
+    expected = feature_name.removeprefix("regime_")
+    return 1.0 if regime_label == expected else 0.0
 
 
 def _float_dict(payload: object, *, default: float = 0.0) -> dict[str, float]:

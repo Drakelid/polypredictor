@@ -14,6 +14,7 @@ from clickhouse_connect.driver.asyncclient import AsyncClient
 from . import asof as asof_q
 from .markets import MarketModelDetail, model_for_market
 from .settings import Settings
+from .users import ensure_demo_user
 
 _CENT = Decimal("0.000001")
 
@@ -23,6 +24,16 @@ class CreateJournalCallInput:
     condition_id: str
     outcome: str
     size_usdc: float
+
+
+@dataclass(frozen=True)
+class AutoJournalFillInput:
+    condition_id: str
+    token_id: str
+    side: str
+    price: float
+    size: float
+    source_event_id: str
 
 
 @dataclass(frozen=True)
@@ -59,23 +70,17 @@ class JournalSummary:
     worst_calls: list[JournalCall]
     edge_scatter: list[dict[str, float]]
     calibration_points: list[dict[str, float]]
+    resolution_sync: JournalResolutionSync | None = None
 
 
-async def ensure_demo_user(pool: Pool, settings: Settings) -> UUID:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO users (email, display_name)
-            VALUES ($1, $2)
-            ON CONFLICT (email) DO UPDATE
-            SET display_name = EXCLUDED.display_name
-            RETURNING id
-            """,
-            settings.journal_demo_user_email,
-            settings.journal_demo_user_name,
-        )
-    assert row is not None
-    return row["id"]
+@dataclass(frozen=True)
+class JournalResolutionSync:
+    proxy_wallet: str
+    verified_at: datetime | None
+    open_positions: int
+    redeemable_positions: int
+    total_position_value_usdc: float
+    total_earnings_usdc: float
 
 
 async def create_manual_call(
@@ -87,7 +92,15 @@ async def create_manual_call(
     asked_at: datetime,
 ) -> JournalCall:
     user_id = await ensure_demo_user(pool, settings)
-    detail = await model_for_market(ch, condition_id=payload.condition_id, asked_at=asked_at)
+    from . import tuning as tuning_q
+
+    tuning_profile = await tuning_q.get_active_profile(pool=pool, settings=settings)
+    detail = await model_for_market(
+        ch,
+        condition_id=payload.condition_id,
+        asked_at=asked_at,
+        tuning_profile=tuning_profile,
+    )
     if detail is None:
         raise ValueError("market not known")
     snapshot = await asof_q.latest_market_snapshot_asof(ch, payload.condition_id, asked_at)
@@ -101,43 +114,95 @@ async def create_manual_call(
         raise ValueError("model probability unavailable")
     band_lo = detail.band_lo if detail.band_lo is not None else model_prob
     band_hi = detail.band_hi if detail.band_hi is not None else model_prob
+    return await _insert_journal_call(
+        pool=pool,
+        user_id=user_id,
+        condition_id=payload.condition_id,
+        token_id=_token_id_for_outcome(snapshot.token_ids, payload.outcome),
+        outcome=payload.outcome,
+        size_usdc=payload.size_usdc,
+        entry_price=entry_price,
+        model_prob=model_prob,
+        band_lo=band_lo,
+        band_hi=band_hi,
+        market_mid=detail.mid,
+        source="manual",
+        created_at=asked_at,
+    )
+
+
+async def create_auto_fill_call(
+    *,
+    pool: Pool,
+    ch: AsyncClient,
+    settings: Settings,
+    payload: AutoJournalFillInput,
+    asked_at: datetime,
+) -> JournalCall | None:
+    user_id = await ensure_demo_user(pool, settings)
+    from . import tuning as tuning_q
 
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
+        existing = await conn.fetchrow(
             """
-            INSERT INTO journal_calls (
-                user_id,
-                condition_id,
-                token_id,
-                outcome,
-                side,
-                size_usdc,
-                entry_price,
-                model_prob_at_call,
-                model_band_lo_at_call,
-                model_band_hi_at_call,
-                market_mid_at_call,
-                source
-            )
-            VALUES ($1, $2, $3, $4, 'BUY', $5, $6, $7, $8, $9, $10, 'manual')
-            RETURNING id, condition_id, outcome, side, size_usdc, entry_price,
-                      model_prob_at_call, model_band_lo_at_call, model_band_hi_at_call,
-                      market_mid_at_call, created_at, resolved_outcome, resolved_at,
-                      pnl_usdc, brier_contribution
+            SELECT id, condition_id, outcome, side, size_usdc, entry_price,
+                   model_prob_at_call, model_band_lo_at_call, model_band_hi_at_call,
+                   market_mid_at_call, created_at, resolved_outcome, resolved_at,
+                   pnl_usdc, brier_contribution
+            FROM journal_calls
+            WHERE user_id = $1
+              AND source = 'auto_wss'
+              AND source_event_id = $2
+            LIMIT 1
             """,
             user_id,
-            payload.condition_id,
-            _token_id_for_outcome(snapshot.token_ids, payload.outcome),
-            payload.outcome,
-            _decimal(payload.size_usdc),
-            _decimal(entry_price),
-            _decimal(model_prob),
-            _decimal(band_lo),
-            _decimal(band_hi),
-            _decimal(detail.mid),
+            payload.source_event_id,
         )
-    assert row is not None
-    return _journal_call_from_row(row)
+    if existing is not None:
+        return _journal_call_from_row(existing)
+
+    tuning_profile = await tuning_q.get_active_profile(pool=pool, settings=settings)
+    detail = await model_for_market(
+        ch,
+        condition_id=payload.condition_id,
+        asked_at=asked_at,
+        tuning_profile=tuning_profile,
+    )
+    if detail is None:
+        return None
+    snapshot = await asof_q.latest_market_snapshot_asof(ch, payload.condition_id, asked_at)
+    if snapshot is None or not snapshot.token_ids:
+        return None
+    directional = _directional_fill_call(
+        token_ids=snapshot.token_ids,
+        token_id=payload.token_id,
+        side=payload.side,
+        price=payload.price,
+        size=payload.size,
+    )
+    if directional is None:
+        return None
+    model_prob = detail.model_prob
+    if model_prob is None:
+        return None
+    band_lo = detail.band_lo if detail.band_lo is not None else model_prob
+    band_hi = detail.band_hi if detail.band_hi is not None else model_prob
+    return await _insert_journal_call(
+        pool=pool,
+        user_id=user_id,
+        condition_id=payload.condition_id,
+        token_id=directional["token_id"],
+        outcome=directional["outcome"],
+        size_usdc=directional["size_usdc"],
+        entry_price=directional["entry_price"],
+        model_prob=model_prob,
+        band_lo=band_lo,
+        band_hi=band_hi,
+        market_mid=detail.mid,
+        source="auto_wss",
+        created_at=asked_at,
+        source_event_id=payload.source_event_id,
+    )
 
 
 async def list_calls(
@@ -199,6 +264,7 @@ async def summary(
         for bucket in buckets
         if bucket["count"] > 0
     ]
+    resolution_sync = await _journal_resolution_sync(pool=pool, settings=settings)
     return JournalSummary(
         total_calls=len(calls),
         resolved_calls=len(resolved),
@@ -210,6 +276,28 @@ async def summary(
         worst_calls=worst_calls,
         edge_scatter=edge_scatter,
         calibration_points=calibration,
+        resolution_sync=resolution_sync,
+    )
+
+
+async def _journal_resolution_sync(
+    *,
+    pool: Pool,
+    settings: Settings,
+) -> JournalResolutionSync | None:
+    # Local import avoids an otherwise unnecessary module dependency at import time.
+    from . import polymarket_account as polymarket_account_q
+
+    link = await polymarket_account_q.get_linked_address(pool=pool, settings=settings)
+    if link.summary is None:
+        return None
+    return JournalResolutionSync(
+        proxy_wallet=link.summary.proxy_wallet,
+        verified_at=link.summary.verified_at,
+        open_positions=link.summary.open_positions,
+        redeemable_positions=link.summary.redeemable_positions,
+        total_position_value_usdc=link.summary.total_position_value_usdc,
+        total_earnings_usdc=link.summary.total_earnings_usdc,
     )
 
 
@@ -313,6 +401,68 @@ def _journal_call_from_row(row: Any) -> JournalCall:
     )
 
 
+async def _insert_journal_call(
+    *,
+    pool: Pool,
+    user_id: UUID,
+    condition_id: str,
+    token_id: str,
+    outcome: str,
+    size_usdc: float,
+    entry_price: float | None,
+    model_prob: float,
+    band_lo: float,
+    band_hi: float,
+    market_mid: float | None,
+    source: str,
+    created_at: datetime,
+    source_event_id: str | None = None,
+) -> JournalCall:
+    if entry_price is None or market_mid is None:
+        raise ValueError("market mid unavailable")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO journal_calls (
+                user_id,
+                condition_id,
+                token_id,
+                outcome,
+                side,
+                size_usdc,
+                entry_price,
+                model_prob_at_call,
+                model_band_lo_at_call,
+                model_band_hi_at_call,
+                market_mid_at_call,
+                source,
+                source_event_id,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, 'BUY', $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            RETURNING id, condition_id, outcome, side, size_usdc, entry_price,
+                      model_prob_at_call, model_band_lo_at_call, model_band_hi_at_call,
+                      market_mid_at_call, created_at, resolved_outcome, resolved_at,
+                      pnl_usdc, brier_contribution
+            """,
+            user_id,
+            condition_id,
+            token_id,
+            outcome,
+            _decimal(size_usdc),
+            _decimal(entry_price),
+            _decimal(model_prob),
+            _decimal(band_lo),
+            _decimal(band_hi),
+            _decimal(market_mid),
+            source,
+            source_event_id,
+            created_at,
+        )
+    assert row is not None
+    return _journal_call_from_row(row)
+
+
 def _entry_price_for_outcome(detail: MarketModelDetail, outcome: str) -> float | None:
     if detail.mid is None:
         return None
@@ -325,6 +475,42 @@ def _token_id_for_outcome(token_ids: list[str], outcome: str) -> str:
     if len(token_ids) > 1:
         return str(token_ids[1])
     return str(token_ids[0])
+
+
+def _directional_fill_call(
+    *,
+    token_ids: list[str],
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+) -> dict[str, Any] | None:
+    token_id = str(token_id)
+    yes_token = str(token_ids[0])
+    no_token = str(token_ids[1]) if len(token_ids) > 1 else yes_token
+    if token_id == yes_token:
+        token_outcome = "YES"
+    elif token_id == no_token:
+        token_outcome = "NO"
+    else:
+        return None
+    side = side.upper()
+    if side == "BUY":
+        outcome = token_outcome
+        entry_price = price
+    elif side == "SELL":
+        outcome = "NO" if token_outcome == "YES" else "YES"
+        entry_price = 1.0 - price
+    else:
+        return None
+    if entry_price <= 0 or entry_price >= 1:
+        return None
+    return {
+        "outcome": outcome,
+        "token_id": _token_id_for_outcome(token_ids, outcome),
+        "entry_price": entry_price,
+        "size_usdc": price * size,
+    }
 
 
 def _predicted_edge_bps(model_prob_yes: float, outcome: str, entry_price: float) -> float:

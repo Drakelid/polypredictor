@@ -6,9 +6,13 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   createJournalCall,
+  fetchExternalEvents,
+  fetchConcentration,
   fetchMarketAsOf,
   fetchMarketHistory,
   fetchMarketModel,
+  fetchSmartMoney,
+  type ExternalEvent,
   type FeatureAttribution,
   type MarketHistoryPoint,
 } from "@/lib/api";
@@ -55,6 +59,28 @@ function fmtDateTime(ts: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function fmtAgeSeconds(ageSeconds: number): string {
+  if (ageSeconds < 3600) return `${Math.max(1, Math.round(ageSeconds / 60))}m ago`;
+  if (ageSeconds < 24 * 3600) return `${Math.round(ageSeconds / 3600)}h ago`;
+  return `${Math.round(ageSeconds / (24 * 3600))}d ago`;
+}
+
+function evidenceSourceLabel(source: string): string {
+  if (source.startsWith("rss:")) return source.slice(4);
+  if (source.startsWith("reddit:")) return source.slice(7);
+  if (source.startsWith("macro:")) return source.slice(6);
+  return source;
+}
+
+function evidenceSummary(event: ExternalEvent): string {
+  const body = event.body.trim();
+  if (body) {
+    return body.length > 180 ? `${body.slice(0, 177)}...` : body;
+  }
+  const title = event.title.trim();
+  return title.length > 180 ? `${title.slice(0, 177)}...` : title;
 }
 
 function baselineSourceLabel(src: string | undefined): string {
@@ -137,6 +163,26 @@ export default function MarketDetailPage() {
     queryFn: () => fetchMarketHistory(conditionId),
     refetchInterval: 60_000,
   });
+  const smartMoney = useQuery({
+    queryKey: ["market-smart-money", conditionId],
+    queryFn: () => fetchSmartMoney(conditionId),
+    refetchInterval: 60_000,
+  });
+  const concentration = useQuery({
+    queryKey: ["market-concentration", conditionId],
+    queryFn: () => fetchConcentration(conditionId),
+    refetchInterval: 60_000,
+  });
+  const evidence = useQuery({
+    queryKey: ["market-external-events", conditionId],
+    queryFn: () =>
+      fetchExternalEvents({
+        conditionId,
+        lookbackHours: 24 * 7,
+        limit: 8,
+      }),
+    refetchInterval: 60_000,
+  });
   const journalCall = useMutation({
     mutationFn: (outcome: "YES" | "NO") =>
       createJournalCall({
@@ -187,6 +233,39 @@ export default function MarketDetailPage() {
                     conf {Math.round(m.confidence * 100)}%
                   </Badge>
                   {m.needs_review && <Badge tone="warn">needs review</Badge>}
+                  {m.resolution_risk_flagged && (
+                    <Badge tone="warn">
+                      resolution risk {m.resolution_risk_level ?? ""}
+                    </Badge>
+                  )}
+                  {m.adversarial_flow_flagged && (
+                    <Badge tone="warn">adversarial flow</Badge>
+                  )}
+                  {m.thin_book && <Badge tone="warn">thin book</Badge>}
+                  {typeof m.smart_money_consensus === "number" && (
+                    <Badge
+                      tone={
+                        m.smart_money_dominant === "YES"
+                          ? "bull"
+                          : m.smart_money_dominant === "NO"
+                            ? "bear"
+                            : "neutral"
+                      }
+                    >
+                      smart $ {m.smart_money_dominant ?? "-"}{" "}
+                      {Math.round((m.smart_money_consensus ?? 0) * 100)}%
+                    </Badge>
+                  )}
+                  {m.concentration_whale_flag && <Badge tone="warn">whale &gt;40%</Badge>}
+                  {typeof m.concentration_score === "number" && (
+                    <Badge
+                      tone={
+                        m.concentration_score > 0.6 ? "warn" : "neutral"
+                      }
+                    >
+                      gini {(m.concentration_score ?? 0).toFixed(2)}
+                    </Badge>
+                  )}
                 </>
               )}
             </div>
@@ -201,6 +280,21 @@ export default function MarketDetailPage() {
               {m?.band_lo != null && m?.band_hi != null && m?.band_coverage != null && (
                 <div className="text-xs text-gray-500">
                   {Math.round(m.band_coverage * 100)}% band: {fmtPct(m.band_lo)} to {fmtPct(m.band_hi)}
+                </div>
+              )}
+              {m?.resolution_risk_flagged && (
+                <div className="text-xs text-amber-400">
+                  Resolution risk {m.resolution_risk_level ?? "flagged"}; edge suppressed and uncertainty widened.
+                </div>
+              )}
+              {m?.adversarial_flow_flagged && (
+                <div className="text-xs text-amber-400">
+                  Adversarial-flow risk elevated; ensemble refinement is being down-weighted.
+                </div>
+              )}
+              {m?.thin_book && (
+                <div className="text-xs text-amber-400">
+                  Thin book: top-of-book depth is below the configured threshold.
                 </div>
               )}
               <div className="text-xs text-gray-500">
@@ -269,6 +363,30 @@ export default function MarketDetailPage() {
                     </ul>
                   </div>
                 )}
+                {m.resolution_risk_reasons && m.resolution_risk_reasons.length > 0 && (
+                  <div className="mt-2 text-sm text-gray-300">
+                    <div className="text-xs uppercase tracking-wide text-gray-500">
+                      Resolution risk
+                    </div>
+                    <ul className="ml-4 list-disc text-gray-400">
+                      {m.resolution_risk_reasons.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {m.adversarial_flow_reasons && m.adversarial_flow_reasons.length > 0 && (
+                  <div className="mt-2 text-sm text-gray-300">
+                    <div className="text-xs uppercase tracking-wide text-gray-500">
+                      Adversarial flow
+                    </div>
+                    <ul className="ml-4 list-disc text-gray-400">
+                      {m.adversarial_flow_reasons.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {m.reasons.length > 0 && (
                   <div className="mt-2 text-sm text-gray-300">
                     <div className="text-xs uppercase tracking-wide text-gray-500">
@@ -317,6 +435,48 @@ export default function MarketDetailPage() {
               ) : (
                 <p className="text-sm text-gray-400">
                   Historical overlay appears once quote history is available for this market.
+                </p>
+              )}
+            </Card>
+          </section>
+
+          <section className="mt-6">
+            <Card title="Raw evidence">
+              {evidence.data && evidence.data.length > 0 ? (
+                <div className="space-y-3">
+                  {evidence.data.map((event) => (
+                    <a
+                      key={`${event.source}:${event.source_id}`}
+                      href={event.url || event.source_uri}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="block rounded border border-gray-800 bg-black/20 px-3 py-3 transition hover:border-gray-700"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                        <span className="uppercase tracking-wide">
+                          {event.event_kind.replaceAll("_", " ")}
+                        </span>
+                        <span>{evidenceSourceLabel(event.source)}</span>
+                        <span>{fmtAgeSeconds(event.age_seconds)}</span>
+                        <span>
+                          freshness {Math.round(event.freshness_weight * 100)}%
+                        </span>
+                      </div>
+                      <div className="mt-1 text-sm font-medium text-white">
+                        {event.title || "Untitled evidence"}
+                      </div>
+                      <div className="mt-1 text-sm text-gray-400">
+                        {evidenceSummary(event)}
+                      </div>
+                      <div className="mt-2 text-xs text-gray-500">
+                        {fmtDateTime(event.event_time)}
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400">
+                  No linked headlines or social evidence have been captured for this market yet.
                 </p>
               )}
             </Card>
@@ -408,6 +568,106 @@ export default function MarketDetailPage() {
                   Feature decomposition appears when ensemble refinement is active.
                 </p>
               )}
+            </Card>
+            <Card title="Smart money & holder concentration">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-gray-500">
+                    Smart-money consensus
+                  </div>
+                  {smartMoney.data ? (
+                    <>
+                      <div className="mt-1 text-2xl font-semibold tabular text-white">
+                        {(smartMoney.data.latest.consensus_score * 100).toFixed(0)}%{" "}
+                        <span className="text-sm font-normal text-gray-400">
+                          {smartMoney.data.latest.dominant_outcome}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {smartMoney.data.latest.sample_wallets} qualified wallets ·
+                        {" "}
+                        YES {smartMoney.data.latest.yes_wallets} / NO{" "}
+                        {smartMoney.data.latest.no_wallets}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        Net USDC{" "}
+                        <span
+                          className={
+                            smartMoney.data.latest.net_size_usdc >= 0
+                              ? "text-edge-bullish"
+                              : "text-edge-bearish"
+                          }
+                        >
+                          {smartMoney.data.latest.net_size_usdc >= 0 ? "+" : ""}
+                          {smartMoney.data.latest.net_size_usdc.toFixed(0)}
+                        </span>
+                        {smartMoney.data.directional_delta_usdc != null && (
+                          <>
+                            {" · 24h Δ "}
+                            <span
+                              className={
+                                smartMoney.data.directional_delta_usdc >= 0
+                                  ? "text-edge-bullish"
+                                  : "text-edge-bearish"
+                              }
+                            >
+                              {smartMoney.data.directional_delta_usdc >= 0 ? "+" : ""}
+                              {smartMoney.data.directional_delta_usdc.toFixed(0)}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="mt-1 text-xs text-gray-500">
+                      No qualified smart-money positions yet for this market.
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-gray-500">
+                    Holder concentration
+                  </div>
+                  {concentration.data ? (
+                    <>
+                      <div className="mt-1 text-2xl font-semibold tabular text-white">
+                        {concentration.data.max_gini != null
+                          ? concentration.data.max_gini.toFixed(2)
+                          : "-"}
+                        <span className="ml-2 text-sm font-normal text-gray-400">
+                          Gini
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        YES top-1{" "}
+                        {concentration.data.yes_top1_pct != null
+                          ? `${(concentration.data.yes_top1_pct * 100).toFixed(0)}%`
+                          : "-"}
+                        {" · NO top-1 "}
+                        {concentration.data.no_top1_pct != null
+                          ? `${(concentration.data.no_top1_pct * 100).toFixed(0)}%`
+                          : "-"}
+                      </div>
+                      {concentration.data.any_whale_flag && (
+                        <div className="mt-1 text-xs text-yellow-300">
+                          Whale alert: single wallet {">"} 40% of an outcome
+                        </div>
+                      )}
+                      {concentration.data.max_gini != null &&
+                        concentration.data.max_gini > 0.6 && (
+                          <div className="mt-1 text-xs text-gray-500">
+                            Smart-money consensus is down-weighted in the ensemble
+                            when concentration {">"} 0.6.
+                          </div>
+                        )}
+                    </>
+                  ) : (
+                    <p className="mt-1 text-xs text-gray-500">
+                      No holder snapshot yet for this market.
+                    </p>
+                  )}
+                </div>
+              </div>
             </Card>
             <Card title="Point-in-time snapshot">
               <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
@@ -512,14 +772,18 @@ function Badge({
   tone = "neutral",
 }: {
   children: React.ReactNode;
-  tone?: "accent" | "neutral" | "warn";
+  tone?: "accent" | "neutral" | "warn" | "bull" | "bear";
 }) {
   const toneClasses =
     tone === "warn"
       ? "border-yellow-700/60 bg-yellow-900/30 text-yellow-200"
       : tone === "accent"
         ? "border-sky-700/60 bg-sky-900/30 text-sky-200"
-        : "border-gray-700 bg-gray-800/60 text-gray-300";
+        : tone === "bull"
+          ? "border-emerald-700/60 bg-emerald-900/30 text-emerald-200"
+          : tone === "bear"
+            ? "border-rose-700/60 bg-rose-900/30 text-rose-200"
+            : "border-gray-700 bg-gray-800/60 text-gray-300";
   return (
     <span className={`rounded border px-2 py-0.5 text-xs ${toneClasses}`}>
       {children}

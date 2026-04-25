@@ -27,6 +27,20 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function putJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(detail || `API ${path} -> ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 export type MarketRow = {
   condition_id: string;
   question: string;
@@ -45,6 +59,18 @@ export type MarketRow = {
   confidence?: number;
   needs_review?: boolean;
   time_to_resolution_s: number | null;
+  // M3 Polymarket-native signals (nullable when data hasn't landed yet).
+  smart_money_consensus?: number | null;
+  smart_money_sample_wallets?: number | null;
+  smart_money_dominant?: string | null;
+  concentration_score?: number | null;
+  concentration_whale_flag?: boolean | null;
+  resolution_risk_score?: number | null;
+  resolution_risk_level?: string | null;
+  resolution_risk_flagged?: boolean;
+  adversarial_flow_score?: number | null;
+  adversarial_flow_flagged?: boolean;
+  thin_book?: boolean;
 };
 
 export async function fetchMarkets(): Promise<MarketRow[]> {
@@ -67,6 +93,9 @@ export type MarketModel = {
   model_source: string;
   refinement_source: string | null;
   baseline_source: string;
+  tuning_profile: string | null;
+  tuning_preset: string | null;
+  tuning_log_odds_shift: number;
   edge_bps: number | null;
   uncertainty_multiplier: number;
   band_lo: number | null;
@@ -84,7 +113,279 @@ export type MarketModel = {
   classifier_reasons: string[];
   driver_summaries: string[];
   feature_attributions: FeatureAttribution[];
+  smart_money_consensus?: number | null;
+  smart_money_sample_wallets?: number | null;
+  smart_money_dominant?: string | null;
+  concentration_score?: number | null;
+  concentration_whale_flag?: boolean | null;
+  concentration_yes_top1_pct?: number | null;
+  concentration_no_top1_pct?: number | null;
+  resolution_risk_score?: number | null;
+  resolution_risk_level?: string | null;
+  resolution_risk_flagged?: boolean;
+  resolution_risk_reasons?: string[];
+  adversarial_flow_score?: number | null;
+  adversarial_flow_flagged?: boolean;
+  adversarial_flow_reasons?: string[];
+  thin_book?: boolean;
 };
+
+export type SmartMoneyMarket = {
+  condition_id: string;
+  latest: {
+    yes_wallets: number;
+    no_wallets: number;
+    yes_size_usdc: number;
+    no_size_usdc: number;
+    yes_avg_entry: number | null;
+    no_avg_entry: number | null;
+    net_size_usdc: number;
+    consensus_score: number;
+    sample_wallets: number;
+    dominant_outcome: string;
+    observed_at: string;
+  };
+  prior_24h: SmartMoneyMarket["latest"] | null;
+  directional_delta_usdc: number | null;
+  consensus_delta_24h: number | null;
+};
+
+export async function fetchSmartMoney(
+  conditionId: string,
+): Promise<SmartMoneyMarket | null> {
+  try {
+    return await getJson<SmartMoneyMarket>(
+      `/v1/markets/${encodeURIComponent(conditionId)}/smart-money`,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export type ConcentrationSummary = {
+  condition_id: string;
+  yes_gini: number | null;
+  no_gini: number | null;
+  max_gini: number | null;
+  yes_top1_pct: number | null;
+  no_top1_pct: number | null;
+  yes_top5_pct: number | null;
+  no_top5_pct: number | null;
+  yes_whale_flag: boolean;
+  no_whale_flag: boolean;
+  any_whale_flag: boolean;
+  yes_holders_count: number;
+  no_holders_count: number;
+  observed_at: string;
+};
+
+export async function fetchConcentration(
+  conditionId: string,
+): Promise<ConcentrationSummary | null> {
+  try {
+    return await getJson<ConcentrationSummary>(
+      `/v1/markets/${encodeURIComponent(conditionId)}/concentration`,
+    );
+  } catch {
+    return null;
+  }
+}
+
+export type SignalEvent = {
+  event_id: string;
+  event_type: string;
+  condition_id: string;
+  severity: number;
+  actor: string;
+  direction: string;
+  size_delta_usdc: number | null;
+  prior_size_usdc: number | null;
+  current_size_usdc: number | null;
+  payload: Record<string, unknown>;
+  event_time: string;
+  observed_at: string;
+};
+
+export type ExternalEvent = {
+  event_kind: string;
+  source: string;
+  source_uri: string;
+  source_id: string;
+  related_markets: string[];
+  author: string;
+  title: string;
+  body: string;
+  url: string;
+  metadata: Record<string, unknown>;
+  event_time: string;
+  observed_at: string;
+  age_seconds: number;
+  decay_half_life_minutes: number;
+  freshness_weight: number;
+};
+
+export type PushPreferences = {
+  email_enabled: boolean;
+  email_to: string | null;
+  webhook_enabled: boolean;
+  webhook_url: string | null;
+  min_severity: number;
+  event_types: string[];
+  condition_ids: string[];
+  updated_at: string | null;
+};
+
+export type PrivacyPreferences = {
+  cross_user_learning_opt_in: boolean;
+  updated_at: string | null;
+};
+
+export type TuningProfile = {
+  name: string;
+  preset: "conservative" | "balanced" | "aggressive" | "custom";
+  log_odds_shifts: Record<string, number>;
+  is_active: boolean;
+  updated_at: string | null;
+};
+
+export type PolymarketTrade = {
+  trade_id: string | null;
+  condition_id: string | null;
+  outcome: string | null;
+  side: string | null;
+  price: number | null;
+  size: number | null;
+  timestamp: string | null;
+};
+
+export type PolymarketAddressSummary = {
+  proxy_wallet: string;
+  verified_at: string | null;
+  open_positions: number;
+  redeemable_positions: number;
+  total_position_value_usdc: number;
+  total_earnings_usdc: number;
+  recent_trades: PolymarketTrade[];
+};
+
+export type PolymarketAddressLink = {
+  proxy_wallet: string | null;
+  verified_at: string | null;
+  summary: PolymarketAddressSummary | null;
+};
+
+export type PolymarketClobCredentialStatus = {
+  configured: boolean;
+  proxy_wallet: string | null;
+  created_at: string | null;
+  rotated_at: string | null;
+};
+
+export type SignalFeedOptions = {
+  lookbackHours?: number;
+  limit?: number;
+  eventTypes?: string[];
+  conditionId?: string;
+  minSeverity?: number;
+};
+
+export type ExternalEventOptions = {
+  lookbackHours?: number;
+  limit?: number;
+  eventKinds?: string[];
+  sources?: string[];
+  conditionId?: string;
+};
+
+export async function fetchSignals(
+  options: SignalFeedOptions = {},
+): Promise<SignalEvent[]> {
+  const qs = new URLSearchParams();
+  if (options.lookbackHours != null) qs.set("lookback_hours", String(options.lookbackHours));
+  if (options.limit != null) qs.set("limit", String(options.limit));
+  if (options.conditionId) qs.set("condition_id", options.conditionId);
+  if (options.minSeverity != null) qs.set("min_severity", String(options.minSeverity));
+  for (const type of options.eventTypes ?? []) qs.append("event_type", type);
+  const qsStr = qs.toString();
+  try {
+    return await getJson<SignalEvent[]>(`/v1/signals${qsStr ? `?${qsStr}` : ""}`);
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchExternalEvents(
+  options: ExternalEventOptions = {},
+): Promise<ExternalEvent[]> {
+  const qs = new URLSearchParams();
+  if (options.lookbackHours != null) qs.set("lookback_hours", String(options.lookbackHours));
+  if (options.limit != null) qs.set("limit", String(options.limit));
+  if (options.conditionId) qs.set("condition_id", options.conditionId);
+  for (const kind of options.eventKinds ?? []) qs.append("event_kind", kind);
+  for (const source of options.sources ?? []) qs.append("source", source);
+  const qsStr = qs.toString();
+  try {
+    return await getJson<ExternalEvent[]>(`/v1/external-events${qsStr ? `?${qsStr}` : ""}`);
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchPushPreferences(): Promise<PushPreferences> {
+  return getJson<PushPreferences>("/v1/push-preferences");
+}
+
+export async function fetchPrivacyPreferences(): Promise<PrivacyPreferences> {
+  return getJson<PrivacyPreferences>("/v1/privacy-preferences");
+}
+
+export async function updatePushPreferences(
+  payload: Omit<PushPreferences, "updated_at">,
+): Promise<PushPreferences> {
+  return putJson<PushPreferences>("/v1/push-preferences", payload);
+}
+
+export async function updatePrivacyPreferences(
+  payload: Omit<PrivacyPreferences, "updated_at">,
+): Promise<PrivacyPreferences> {
+  return putJson<PrivacyPreferences>("/v1/privacy-preferences", payload);
+}
+
+export async function fetchTuningProfile(): Promise<TuningProfile> {
+  return getJson<TuningProfile>("/v1/tuning-profile");
+}
+
+export async function updateTuningProfile(payload: {
+  preset: TuningProfile["preset"];
+  log_odds_shifts: Record<string, number>;
+}): Promise<TuningProfile> {
+  return putJson<TuningProfile>("/v1/tuning-profile", payload);
+}
+
+export async function fetchPolymarketAddress(): Promise<PolymarketAddressLink> {
+  return getJson<PolymarketAddressLink>("/v1/polymarket-address");
+}
+
+export async function fetchPolymarketClobCredentials(): Promise<PolymarketClobCredentialStatus> {
+  return getJson<PolymarketClobCredentialStatus>("/v1/polymarket-clob-credentials");
+}
+
+export async function updatePolymarketAddress(
+  proxyWallet: string | null,
+): Promise<PolymarketAddressLink> {
+  return putJson<PolymarketAddressLink>("/v1/polymarket-address", {
+    proxy_wallet: proxyWallet,
+  });
+}
+
+export async function updatePolymarketClobCredentials(payload: {
+  api_key: string | null;
+  api_secret: string | null;
+  passphrase: string | null;
+  proxy_wallet: string | null;
+}): Promise<PolymarketClobCredentialStatus> {
+  return putJson<PolymarketClobCredentialStatus>("/v1/polymarket-clob-credentials", payload);
+}
 
 export type FeatureAttribution = {
   feature_name: string;
@@ -164,6 +465,14 @@ export type JournalSummary = {
   unresolved_calls: number;
   avg_brier: number | null;
   total_pnl_usdc: number;
+  resolution_sync: {
+    proxy_wallet: string;
+    verified_at: string | null;
+    open_positions: number;
+    redeemable_positions: number;
+    total_position_value_usdc: number;
+    total_earnings_usdc: number;
+  } | null;
   confidence_buckets: Array<{
     label: string;
     bucket_mid: number;
@@ -215,11 +524,137 @@ export async function fetchJournalSummary(): Promise<JournalSummary> {
       unresolved_calls: 0,
       avg_brier: null,
       total_pnl_usdc: 0,
+      resolution_sync: null,
       confidence_buckets: [],
       best_calls: [],
       worst_calls: [],
       edge_scatter: [],
       calibration_points: [],
+    };
+  }
+}
+
+export type DriftMetricRow = {
+  window_label: string;
+  market_type: string;
+  ttr_bucket: string;
+  regime: string | null;
+  sample_count: number;
+  brier: number;
+  ece: number;
+  coverage: number | null;
+  avg_predicted: number;
+  avg_outcome: number;
+  baseline_brier: number | null;
+  brier_skill: number | null;
+  observed_at: string;
+};
+
+export type FeatureDriftMetricRow = {
+  feature_name: string;
+  reference_count: number;
+  current_count: number;
+  psi: number;
+  kl_divergence: number;
+  psi_threshold: number;
+  is_alert: boolean;
+  observed_at: string;
+};
+
+export type DriftSnapshot = {
+  observed_at: string | null;
+  model_metrics: DriftMetricRow[];
+  feature_metrics: FeatureDriftMetricRow[];
+};
+
+export async function fetchDriftSnapshot(): Promise<DriftSnapshot> {
+  try {
+    return await getJson<DriftSnapshot>("/v1/drift-monitor");
+  } catch {
+    return {
+      observed_at: null,
+      model_metrics: [],
+      feature_metrics: [],
+    };
+  }
+}
+
+export type BacktestCalibrationPoint = {
+  bucket_mid: number;
+  avg_predicted: number;
+  hit_rate: number;
+  count: number;
+};
+
+export type BacktestReplayRow = {
+  condition_id: string;
+  market_type: string;
+  regime: string | null;
+  asked_at: string;
+  resolved_at: string;
+  predicted_prob: number;
+  outcome: number;
+  brier_contribution: number;
+  time_to_resolution_s: number;
+  band_lo: number | null;
+  band_hi: number | null;
+  band_hit: boolean | null;
+};
+
+export type BacktestSnapshot = {
+  lookback_days: number;
+  horizon_hours: number;
+  total_samples: number;
+  calibration_points: BacktestCalibrationPoint[];
+  rows: BacktestReplayRow[];
+  corpus: {
+    total_resolved_markets: number;
+    binary_markets: number;
+    invalid_markets: number;
+    disputed_markets: number;
+    low_volume_markets: number;
+    missing_snapshot_markets: number;
+  };
+  tuning_comparison: {
+    profile_name: string;
+    profile_preset: string;
+    total_samples: number;
+    default_brier: number;
+    tuned_brier: number;
+    brier_delta: number;
+    default_calibration_points: BacktestCalibrationPoint[];
+    tuned_calibration_points: BacktestCalibrationPoint[];
+  } | null;
+};
+
+export async function fetchBacktestSnapshot(
+  lookbackDays = 90,
+  horizonHours = 24,
+  limit = 500,
+): Promise<BacktestSnapshot> {
+  const qs = new URLSearchParams({
+    lookback_days: String(lookbackDays),
+    horizon_hours: String(horizonHours),
+    limit: String(limit),
+  });
+  try {
+    return await getJson<BacktestSnapshot>(`/v1/backtest/walk-forward?${qs}`);
+  } catch {
+    return {
+      lookback_days: lookbackDays,
+      horizon_hours: horizonHours,
+      total_samples: 0,
+      calibration_points: [],
+      rows: [],
+      corpus: {
+        total_resolved_markets: 0,
+        binary_markets: 0,
+        invalid_markets: 0,
+        disputed_markets: 0,
+        low_volume_markets: 0,
+        missing_snapshot_markets: 0,
+      },
+      tuning_comparison: null,
     };
   }
 }

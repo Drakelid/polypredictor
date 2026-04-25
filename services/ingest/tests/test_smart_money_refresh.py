@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
+from ingest.workers.smart_money_qualify import QualificationThresholds
 from ingest.workers.smart_money_refresh import (
     LEADERBOARD_CATEGORIES,
     LEADERBOARD_ORDERINGS,
@@ -10,10 +9,16 @@ from ingest.workers.smart_money_refresh import (
     LeaderboardWallet,
     fetch_leaderboard_wallets,
     merge_wallets,
+    qualify_all,
     run_once,
-    snapshot_wallet_positions,
 )
-from ingest.writers import SMART_MONEY_POSITIONS_COLS
+from ingest.workers.whale_flow import WhaleFlowThresholds
+from ingest.writers import (
+    SIGNAL_EVENTS_COLS,
+    SMART_MONEY_PER_MARKET_COLS,
+    SMART_MONEY_POSITIONS_COLS,
+    SMART_MONEY_QUALIFICATIONS_COLS,
+)
 from polymarket_client import LeaderboardEntry, Position
 
 
@@ -58,15 +63,32 @@ def _position(
     )
 
 
+class _QueryResult:
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self.result_rows = rows
+
+
 class _FakeClickHouse:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        prior_position_rows: list[tuple[object, ...]] | None = None,
+    ) -> None:
         self.insert_calls: list[tuple[str, list[tuple[object, ...]], list[str]]] = []
+        self.query_calls: list[tuple[str, dict[str, object] | None]] = []
+        self._prior_position_rows = prior_position_rows or []
         self.closed = False
 
     async def insert(
         self, table: str, rows: list[tuple[object, ...]], column_names: list[str]
     ) -> None:
         self.insert_calls.append((table, rows, column_names))
+
+    async def query(
+        self, query: str, parameters: dict[str, object] | None = None
+    ) -> _QueryResult:
+        self.query_calls.append((query, parameters))
+        return _QueryResult(list(self._prior_position_rows))
 
     async def close(self) -> None:
         self.closed = True
@@ -145,74 +167,87 @@ async def test_fetch_leaderboard_wallets_queries_all_requested_slices() -> None:
     assert [wallet.proxy_wallet for wallet in wallets] == ["0xaaa", "0xbbb"]
 
 
-@pytest.mark.asyncio
-async def test_snapshot_wallet_positions_inserts_position_rows_with_leaderboard_context() -> None:
-    observed_at = datetime(2026, 4, 23, 12, tzinfo=UTC)
-    data = _FakeDataClient(
-        positions_by_wallet={
-            "0xaaa": [
-                _position("0xaaa", condition_id="cond-1", token_id="tok-yes"),
-                _position(
-                    "0xaaa",
-                    condition_id="cond-2",
-                    token_id="tok-no",
-                    outcome="no",
-                    size=50.0,
-                    avg_price=0.62,
-                    current_value=18.0,
-                ),
-            ]
-        }
-    )
-    ch = _FakeClickHouse()
-    wallet = LeaderboardWallet(
-        proxy_wallet="0xaaa",
-        rank=4,
-        pnl=1250.0,
-        volume=25_000.0,
-        sources=("CRYPTO:MONTH:PNL",),
-    )
+def test_qualify_all_returns_one_decision_per_wallet() -> None:
+    wallets = [
+        LeaderboardWallet(
+            proxy_wallet="0xgood",
+            rank=3,
+            pnl=4000.0,
+            volume=60_000.0,
+            sources=("CRYPTO:MONTH:PNL", "CRYPTO:ALL:VOL"),
+        ),
+        LeaderboardWallet(
+            proxy_wallet="0xthin",
+            rank=10,
+            pnl=100.0,
+            volume=100.0,
+            sources=("CRYPTO:MONTH:PNL",),
+        ),
+    ]
+    positions_by_wallet = {
+        "0xgood": [
+            _position("0xgood", condition_id=f"m{i}", token_id=f"tok{i}")
+            for i in range(4)
+        ],
+        "0xthin": [_position("0xthin", condition_id="m1", token_id="tok1")],
+    }
+    thresholds = QualificationThresholds(min_volume=10_000.0, min_distinct_markets=3)
 
-    inserted = await snapshot_wallet_positions(
-        _FakePm(data),
-        ch,
-        wallet,
-        positions_limit=200,
-        observed_at=observed_at,
-    )
+    decisions = qualify_all(wallets, positions_by_wallet, thresholds)
 
-    assert inserted == 2
-    assert data.position_calls == [("0xaaa", 200)]
-    assert len(ch.insert_calls) == 1
-    table, rows, cols = ch.insert_calls[0]
-    assert table == "positions_smart_money"
-    assert cols == SMART_MONEY_POSITIONS_COLS
-    by = dict(zip(cols, rows[0], strict=True))
-    assert by["proxy_wallet"] == "0xaaa"
-    assert by["condition_id"] == "cond-1"
-    assert by["token_id"] == "tok-yes"
-    assert by["leaderboard_rank"] == 4
-    assert by["leaderboard_pnl"] == pytest.approx(1250.0)
-    assert by["leaderboard_vol"] == pytest.approx(25_000.0)
-    assert by["event_time"] == observed_at
-    assert by["observed_at"] == observed_at
+    by_wallet = {decision.proxy_wallet: decision for decision in decisions}
+    assert by_wallet["0xgood"].qualified is True
+    assert by_wallet["0xthin"].qualified is False
 
 
 @pytest.mark.asyncio
-async def test_run_once_refreshes_unique_wallets_and_closes_clickhouse(monkeypatch: pytest.MonkeyPatch) -> None:
-    ch = _FakeClickHouse()
+async def test_run_once_writes_qualifications_positions_and_per_market(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Prior snapshot: 0xgood previously held 5k USDC on cond-1 YES. Current
+    # pass we add cond-1 YES at 55k (resize above 10k), cond-2 YES at new 12k
+    # (open above threshold), and close cond-legacy NO at 40k (close above
+    # threshold). cond-3 NO is new but only 2k USDC, below thresholds.
+    ch = _FakeClickHouse(
+        prior_position_rows=[
+            # (wallet, condition_id, token_id, outcome, size, avg_entry, usdc)
+            ("0xgood", "cond-1", "tok-1", "YES", 100.0, 0.45, 5_000.0),
+            ("0xgood", "cond-legacy", "tok-l", "NO", 80.0, 0.5, 40_000.0),
+        ]
+    )
     data = _FakeDataClient(
         leaderboard_rows={
-            ("CRYPTO", "MONTH", "PNL"): [_entry("0xaaa", rank=1, pnl=100.0, volume=800.0)],
-            ("CRYPTO", "ALL", "VOL"): [_entry("0xaaa", rank=2, pnl=120.0, volume=1600.0)],
-            ("FINANCE", "MONTH", "PNL"): [_entry("0xbbb", rank=3, pnl=90.0, volume=700.0)],
+            ("CRYPTO", "MONTH", "PNL"): [
+                _entry("0xgood", rank=1, pnl=5000.0, volume=60_000.0),
+                _entry("0xthin", rank=2, pnl=500.0, volume=500.0),
+            ],
+            ("CRYPTO", "ALL", "VOL"): [
+                _entry("0xgood", rank=5, pnl=4500.0, volume=65_000.0),
+            ],
         },
         positions_by_wallet={
-            "0xaaa": [
-                _position("0xaaa", condition_id="cond-1", token_id="tok-1"),
-                _position("0xaaa", condition_id="cond-2", token_id="tok-2"),
+            "0xgood": [
+                _position(
+                    "0xgood",
+                    condition_id="cond-1",
+                    token_id="tok-1",
+                    current_value=55_000.0,
+                ),
+                _position(
+                    "0xgood",
+                    condition_id="cond-2",
+                    token_id="tok-2",
+                    current_value=12_000.0,
+                ),
+                _position(
+                    "0xgood",
+                    condition_id="cond-3",
+                    token_id="tok-3",
+                    outcome="no",
+                    current_value=500.0,
+                ),
             ],
-            "0xbbb": [_position("0xbbb", condition_id="cond-3", token_id="tok-3")],
+            "0xthin": [_position("0xthin", condition_id="cond-1", token_id="tok-1")],
         },
     )
 
@@ -224,14 +259,53 @@ async def test_run_once_refreshes_unique_wallets_and_closes_clickhouse(monkeypat
         _fake_get_async_client,
     )
 
-    wallets, inserted_rows = await run_once(
+    stats = await run_once(
         _FakePm(data),
         leaderboard_limit=100,
         positions_limit=50,
+        thresholds=QualificationThresholds(min_volume=10_000.0, min_distinct_markets=3),
+        whale_thresholds=WhaleFlowThresholds(
+            open_threshold_usdc=10_000.0, resize_pct=0.20
+        ),
     )
 
-    assert wallets == 2
-    assert inserted_rows == 3
+    assert stats.wallets == 2
+    assert stats.qualified_wallets == 1
+    assert stats.position_rows == 4  # 3 positions for 0xgood + 1 for 0xthin
+    assert stats.per_market_rows == 3  # only 0xgood's 3 markets roll up
+    # cond-1 resize, cond-2 open, cond-legacy close — cond-3 is too small.
+    assert stats.whale_events == 3
     assert ch.closed is True
-    assert [call[:3] for call in data.leaderboard_calls].count(("CRYPTO", "MONTH", "PNL")) == 1
-    assert sorted(data.position_calls) == [("0xaaa", 50), ("0xbbb", 50)]
+
+    tables_written = [call[0] for call in ch.insert_calls]
+    assert "positions_smart_money" in tables_written
+    assert "smart_money_qualifications" in tables_written
+    assert "smart_money_per_market" in tables_written
+    assert "signal_events" in tables_written
+
+    # Qualifications: 2 rows, one per merged wallet.
+    qual_call = next(c for c in ch.insert_calls if c[0] == "smart_money_qualifications")
+    _, qual_rows, qual_cols = qual_call
+    assert qual_cols == SMART_MONEY_QUALIFICATIONS_COLS
+    assert len(qual_rows) == 2
+    by_wallet = {row[0]: row for row in qual_rows}
+    assert by_wallet["0xgood"][1] == 1
+    assert by_wallet["0xthin"][1] == 0
+
+    pos_call = next(c for c in ch.insert_calls if c[0] == "positions_smart_money")
+    assert pos_call[2] == SMART_MONEY_POSITIONS_COLS
+
+    per_market_call = next(c for c in ch.insert_calls if c[0] == "smart_money_per_market")
+    assert per_market_call[2] == SMART_MONEY_PER_MARKET_COLS
+    per_market_condition_ids = {row[0] for row in per_market_call[1]}
+    assert per_market_condition_ids == {"cond-1", "cond-2", "cond-3"}
+
+    whale_call = next(c for c in ch.insert_calls if c[0] == "signal_events")
+    assert whale_call[2] == SIGNAL_EVENTS_COLS
+    rows = [dict(zip(SIGNAL_EVENTS_COLS, row, strict=True)) for row in whale_call[1]]
+    by_market = {r["condition_id"]: r for r in rows}
+    assert by_market["cond-1"]["event_type"] == "whale_resize"
+    assert by_market["cond-2"]["event_type"] == "whale_open"
+    assert by_market["cond-legacy"]["event_type"] == "whale_close"
+
+    assert sorted(data.position_calls) == [("0xgood", 50), ("0xthin", 50)]

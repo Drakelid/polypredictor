@@ -57,7 +57,12 @@ async def latest_binary_resolutions(
     resolved_to: datetime | None = None,
     limit: int = 500,
 ) -> list[tuple[str, str, datetime]]:
-    """Latest YES/NO resolution row per market in the requested window."""
+    """First-observed YES/NO resolution row per market in the requested window.
+
+    Revisions remain in ``market_resolutions`` as later rows, but replay and
+    backtest paths freeze the label at the original observed resolution so a
+    later UMA dispute or manual correction does not rewrite history.
+    """
     conditions: list[str] = [
         "resolved_outcome IN ('YES', 'NO')",
     ]
@@ -73,7 +78,7 @@ async def latest_binary_resolutions(
         SELECT condition_id, resolved_outcome, event_time
         FROM market_resolutions
         WHERE {where}
-        ORDER BY condition_id, observed_at DESC
+        ORDER BY condition_id, observed_at ASC
         LIMIT 1 BY condition_id
         ORDER BY event_time DESC
         LIMIT {{limit:UInt32}}

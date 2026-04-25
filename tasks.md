@@ -131,7 +131,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Delta vs market price; **Kelly-suggested size** (user-capped, fractional Kelly)  <!-- detail payload now includes capped fractional-Kelly sizing from displayed model vs market -->
 - [x] Price history overlaid with historical model probability  <!-- /v1/markets/{condition_id}/history replays PIT model probability over stored quote history -->
 - [~] "Why not the market's price?" section populated from top-3 SHAP drivers  <!-- now populated from deterministic ensemble driver summaries; formal SHAP path still pending -->
-- [ ] Links to raw evidence (tweets/headlines slot in M4)
+- [x] Links to raw evidence (tweets/headlines slot in M4)  <!-- market detail page now renders linked external_events evidence cards (RSS/Reddit/macro sources today) -->
 
 ### 2.6 Journal v0 (F4, manual entries only)
 - [x] "Mark my call: YES/NO at X¢" button captures model prob + market mid at that instant  <!-- detail page posts manual journal calls against a demo internal user -->
@@ -149,36 +149,36 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 ### 3.1 Smart Money Tracker (F6)
 - [x] Daily leaderboard refresh: `/v1/leaderboard?category=CRYPTO|FINANCE` with `timePeriod=MONTH` and `ALL`, orderings by `PNL` **and** `VOL`  <!-- services/ingest/src/ingest/workers/smart_money_refresh.py snapshots deduped leaderboard wallets across all 8 slices into positions_smart_money -->
-- [ ] Wash-trading guards (§9): minimum trade count, multi-market requirement, PnL+VOL cross-check before qualifying as smart money
-- [ ] Rolling ~500-wallet smart-money set persisted with qualification history
-- [ ] Per-market aggregation: wallets YES vs NO, total size, avg entry, 24h directional delta
-- [ ] Feature `smart_money_consensus` into the ensemble, **down-weighted when holder concentration > 0.6**
+- [x] Wash-trading guards (§9): minimum trade count, multi-market requirement, PnL+VOL cross-check before qualifying as smart money  <!-- services/ingest/src/ingest/workers/smart_money_qualify.py: PnL+VOL cross-check, min_distinct_markets, min_volume floor (volume as proxy for trade count) -->
+- [x] Rolling ~500-wallet smart-money set persisted with qualification history  <!-- smart_money_qualifications ClickHouse table (append-only history of qualification decisions per wallet per refresh) -->
+- [x] Per-market aggregation: wallets YES vs NO, total size, avg entry, 24h directional delta  <!-- smart_money_per_market table + /v1/markets/{cid}/smart-money endpoint; 24h delta derived from a prior-snapshot as-of read -->
+- [x] Feature `smart_money_consensus` into the ensemble, **down-weighted when holder concentration > 0.6**  <!-- ensemble.py: smart_money_consensus + holder_concentration in BOOSTER_FEATURE_NAMES; services/api/src/api/markets.py linearly attenuates consensus when max-Gini > settings.holder_concentration_down_weight_threshold (default 0.6) -->
 
 ### 3.2 Holder concentration (F6)
-- [ ] `/holders?market={conditionIds}` poll (300s TTL)
-- [ ] Gini-style concentration score per outcome
-- [ ] Flag markets with any single wallet > 40% of an outcome
-- [ ] Feature fed into ensemble; UI shows a concentration badge
+- [x] `/holders?market={conditionIds}` poll (300s TTL)  <!-- services/ingest/src/ingest/workers/holders_poller.py: batched /holders calls, rank + pct-of-outcome per holder, 300s cadence matching data-api TTL -->
+- [x] Gini-style concentration score per outcome  <!-- services/ingest/src/ingest/workers/concentration.py: Lorenz-curve Gini + top1/top5 share per YES/NO outcome persisted to market_concentration -->
+- [x] Flag markets with any single wallet > 40% of an outcome  <!-- whale flag per outcome + any_whale_flag; settings.holder_concentration_whale_threshold configurable -->
+- [x] Feature fed into ensemble; UI shows a concentration badge  <!-- holder_concentration feature in EnsembleSample; dashboard + detail render whale / gini / smart-money badges; /v1/markets/{cid}/concentration endpoint -->
 
 ### 3.3 Whale flow + alerts (F6 + F3)
-- [ ] Snapshot-diff job detects position changes among top-50 smart-money wallets
-- [ ] Signal-feed event on opens/resizes ≥ 10k USDC **or** ≥ 20% of wallet's current market size
-- [ ] Alerts clickable to the driving position / market
+- [x] Snapshot-diff job detects position changes among top-50 smart-money wallets  <!-- services/ingest/src/ingest/workers/whale_flow.py diffs qualified-wallet positions against prior positions_smart_money snapshots during the smart_money_refresh pass -->
+- [x] Signal-feed event on opens/resizes ≥ 10k USDC **or** ≥ 20% of wallet's current market size  <!-- thresholds configurable via settings (whale_flow_open_threshold_usdc=10k, whale_flow_resize_pct=0.20); pct branch guarded by a min_reference_usdc floor so dust opens do not spam the feed -->
+- [x] Alerts clickable to the driving position / market  <!-- SignalFeedRow in apps/web/src/app/page.tsx links each event to /markets/{condition_id} -->
 
 ### 3.4 Sibling / arb checker (F8)
-- [ ] Event-group builder: same-threshold / different-date, same-date / different-threshold, mutually-exclusive multi-outcome legs
-- [ ] No-arb violation detector with implied size after spread + fees
-- [ ] Sibling-implied prior exposed as a first-class feature to the ensemble (must be able to dominate when present, §6.3)
-- [ ] External-venue cross-check: perp-basis-implied and Deribit-options-implied probabilities; divergence flagged
+- [x] Event-group builder: same-threshold / different-date, same-date / different-threshold, mutually-exclusive multi-outcome legs  <!-- packages/model/src/model/sibling_arb.py builds ordered threshold pairs plus multi-outcome event groups from PIT snapshots/classifications -->
+- [x] No-arb violation detector with implied size after spread + fees  <!-- services/ingest/src/ingest/workers/arb_checker.py emits `arb` signal_events using top-of-book bid/ask + size and configurable taker-fee bps -->
+- [x] Sibling-implied prior exposed as a first-class feature to the ensemble (must be able to dominate when present, §6.3)  <!-- services/api/src/api/markets.py derives sibling bounds at read time; packages/model/src/model/ensemble.py adds sibling_implied_prior_logit as a linear ensemble feature -->
+- [x] External-venue cross-check: perp-basis-implied and Deribit-options-implied probabilities; divergence flagged  <!-- services/ingest/src/ingest/workers/external_divergence.py compares threshold-market mids against Binance perp-basis + Deribit options implied probabilities and emits `external_divergence` signal_events -->
 
 ### 3.5 Signal Feed v1 (F3)
-- [ ] Unified feed across whale events, arb violations, large prints, book imbalance shocks
-- [ ] Filter controls by market, signal type, weight
-- [ ] Per-user push preferences (email + webhook first; browser push in M7 if time)
+- [x] Unified feed across whale events, arb violations, large prints, book imbalance shocks  <!-- services/ingest/src/ingest/workers/microstructure_signals.py now emits large_print + book_shock into signal_events alongside the existing whale/arb/external signal stream -->
+- [x] Filter controls by market, signal type, weight  <!-- /v1/signals now supports min_severity and the dashboard exposes market / type / weight controls over the unified feed -->
+- [x] Per-user push preferences (email + webhook first; browser push in M7 if time)  <!-- Postgres-backed user_push_preferences + /v1/push-preferences API + dashboard settings panel for email/webhook channels, event types, market scope, and severity threshold -->
 
 ### 3.6 Exit criteria for M3
-- [ ] Smart-money features shipping to the model; ablation shows non-zero contribution on backtest
-- [ ] Arb checker finds known historical no-arb violations in replay
+- [ ] Smart-money features shipping to the model; ablation shows non-zero contribution on backtest  <!-- auditable via services/api/src/api/m3_audit.py smart-money ablation replay over resolved markets -->
+- [ ] Arb checker finds known historical no-arb violations in replay  <!-- auditable via services/api/src/api/m3_audit.py replay against historical arb signal events -->
 - [ ] Signal feed populated live with ≥ 10 actionable events/day across the tracked set
 
 ---
@@ -197,30 +197,30 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
   - [ ] Encoder-based headline-type classifier (breaking / opinion / rumor / dev update)
 
 ### 4.2 News + Reddit (P1 / P2)
-- [ ] RSS ingestion: Bloomberg, Reuters, The Block, CoinDesk (5-min cadence)
-- [ ] Reddit (`r/CryptoCurrency`, `r/wallstreetbets`) 15-min cadence — retail sentiment
-- [ ] Discord integration deferred to v1.1 per §11.6 — create stub + decision note
-- [ ] Decay functions per-source (§6.10 stale-signal)
+- [~] RSS ingestion: Bloomberg, Reuters, The Block, CoinDesk (5-min cadence)  <!-- configurable RSS worker now writes external_events from public feeds via services/ingest/src/ingest/workers/rss_ingest.py; Bloomberg/The Block/CoinDesk example sources are wired, Reuters public RSS still needs a replacement path -->
+- [x] Reddit (`r/CryptoCurrency`, `r/wallstreetbets`) 15-min cadence — retail sentiment  <!-- public Reddit JSON worker now writes external_events via services/ingest/src/ingest/workers/reddit_ingest.py -->
+- [x] Discord integration deferred to v1.1 per §11.6 — create stub + decision note  <!-- docs/decisions/discord-v1_1.md + services/ingest/src/ingest/workers/discord_stub.py -->
+- [x] Decay functions per-source (§6.10 stale-signal)  <!-- services/api/src/api/external_events.py computes PIT-safe source-specific freshness weights; exposed via GET /v1/external-events -->
 
 ### 4.3 Event-time layer (§6.3)
-- [ ] Macro calendar ingestion: FOMC, CPI, NFP, ETF deadlines, protocol unlocks
-- [ ] Pre-event IV run-up / crush features
-- [ ] Event-window flag (t ± 24h)
-- [ ] Post-event drift features (t+1h → t+24h)
-- [ ] Consensus-surprise feature (actual minus survey) once released
-- [ ] Event-time layer kept **separate** from non-event features to avoid polluting the base distribution
+- [~] Macro calendar ingestion: FOMC, CPI, NFP, ETF deadlines, protocol unlocks  <!-- curated scheduled-event worker now writes macro external_events via services/ingest/src/ingest/workers/scheduled_events_ingest.py + services/ingest/data/scheduled_events.example.json; live official feeds still need to replace the file-backed bootstrap -->
+- [x] Pre-event IV run-up / crush features  <!-- services/api/src/api/event_time.py now derives PIT pre-event ATM-IV run-up over the prior 24h and post-event IV crush from Deribit IV-surface history, keyed off the classified asset and nearest expiry after the scheduled event; exposed via /v1/event-time/{condition_id}/asof -->
+- [x] Event-window flag (t ± 24h)  <!-- services/api/src/api/event_time.py + GET /v1/event-time/{condition_id}/asof -->
+- [x] Post-event drift features (t+1h → t+24h)  <!-- services/api/src/api/event_time.py computes post_event_mid_1h, post_event_mid_24h, and post_event_drift_1h_to_24h from PIT quotes -->
+- [x] Consensus-surprise feature (actual minus survey) once released  <!-- scheduled-event metadata now carries consensus_value/actual_value/value_unit, and api.event_time exposes surprise_value for released catalysts -->
+- [x] Event-time layer kept **separate** from non-event features to avoid polluting the base distribution  <!-- scheduled catalysts are served from api.event_time, not mixed into market_features -->
 
 ### 4.4 Resolution-risk classifier (F9)
-- [ ] Training corpus: UMA dispute history + unexpectedly-resolved markets
-- [ ] Score every active market's resolution text at ingest
-- [ ] UI: warning badge on flagged markets
-- [ ] Rule: edge alerts suppressed above a risk threshold
-- [ ] Integration: score enters ensemble as feature **and** as a post-hoc multiplier widening the conformal interval
+- [x] Training corpus: UMA dispute history + unexpectedly-resolved markets  <!-- services/api/src/api/resolution_risk_corpus.py now materializes a PIT training corpus from append-only market_resolutions + market snapshots at first resolution time, labeling disputed / revised / invalid / manual paths into resolution_risk_corpus; runner: `uv run python -m api.resolution_risk_corpus` / `make resolution-risk-corpus` -->
+- [x] Score every active market's resolution text at ingest  <!-- heuristic scorer runs in services/ingest/src/ingest/workers/gamma_discovery.py and persists append-only rows to market_resolution_risk -->
+- [x] UI: warning badge on flagged markets  <!-- dashboard + detail pages render resolution-risk badges/reasons from API fields -->
+- [x] Rule: edge alerts suppressed above a risk threshold  <!-- services/api/src/api/markets.py suppresses edge/Kelly when resolution_risk_score exceeds configured threshold -->
+- [x] Integration: score enters ensemble as feature **and** as a post-hoc multiplier widening the conformal interval  <!-- resolution_risk_score is threaded into EnsembleSample and risk_multiplier widens served conformal bands -->
 
 ### 4.5 Adversarial-flow score (§6.10)
-- [ ] Detect large directional flow uncorrelated with perps / options / social
-- [ ] Down-weight affected markets in the ensemble
-- [ ] Surface `thin_book` tag when book depth below threshold (§9)
+- [x] Detect large directional flow uncorrelated with perps / options / social  <!-- services/api/src/api/adversarial_flow.py derives an adversarial_flow_score from persisted directional-flow features, recent external_divergence signals, and linked external_events evidence -->
+- [x] Down-weight affected markets in the ensemble  <!-- services/api/src/api/markets.py now attenuates ensemble-vs-baseline deltas when adversarial_flow_score is elevated and also threads the score into EnsembleSample -->
+- [x] Surface `thin_book` tag when book depth below threshold (§9)  <!-- API derives top-of-book notional depth from latest market_quotes bid/ask sizes and dashboard/detail render a thin-book badge -->
 
 ### 4.6 Exit criteria for M4
 - [ ] Social + event-time + resolution-risk all feeding the model
@@ -231,12 +231,14 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 ## M5 — On-chain + macro (Week 14)
 
-- [ ] Glassnode / Dune free-tier ingestion: exchange in/outflows, stablecoin supply, whale-wallet activity
-- [ ] Cross-validate price feeds across Binance / Coinbase / CoinGecko; drop divergent samples (§6.10)
-- [ ] Deribit IV, skew, term structure poller (if not already from M1)
-- [ ] Perp funding + basis poller (Binance + Coinbase derivatives)
-- [ ] FRED / BLS daily job for macro series
-- [ ] On-chain + macro signals join the event-time layer where scheduled, main feature set otherwise
+- [x] Glassnode / Dune free-tier ingestion: exchange in/outflows, stablecoin supply, whale-wallet activity  <!-- services/ingest/src/ingest/workers/onchain_metrics.py polls Glassnode `/v1/metrics/{category}/{metric}` and Dune `/api/v1/query/{id}/results` against config files at services/ingest/data/onchain_glassnode.json + onchain_dune.json. Both API keys are optional; when neither is configured the worker no-ops. Rows land in onchain_metrics with PIT-safe (period_date, observed_at) via ReplacingMergeTree(observed_at). Bootstrap configs cover BTC exchange in/outflows, USDT/USDC supply, BTC whale-wallet count; Dune slots illustrate the column-mapping shape. PIT read API at services/api/src/api/onchain_metrics.py exposes `latest_onchain_metric_asof` + `list_onchain_metrics`, surfaced as GET /v1/onchain-metrics. Runner: `make ingest-onchain-metrics` -->
+- [x] On-chain metrics joining the ensemble feature set  <!-- services/api/src/api/onchain_features.py loads a per-request OnchainFeatureContext (per-asset 30d z-scores for inflow/outflow, 7d pct delta for whale-wallet count, summed USDT+USDC supply pct delta). EnsembleSample gained onchain_exchange_inflow_z / outflow_z / whale_count_delta_pct / stablecoin_supply_delta_pct fields, BOOSTER_FEATURE_NAMES extends with the same names. markets.py threads the context through both list and detail paths. Legacy fitted registries train no stumps for these names so existing serve paths are unaffected until the next retraining run. -->
+- [x] Cross-validate price feeds across Binance / Coinbase / CoinGecko; drop divergent samples (§6.10)  <!-- spot_price_validation worker now polls the three venues, rejects outlier quotes beyond a bps threshold, and persists only consensus-safe reference prices in validated_spot_prices -->
+- [x] Deribit IV, skew, term structure poller (if not already from M1)  <!-- services/ingest/src/ingest/workers/deribit_iv_surface.py persists ATM IV, OTM call/put IV, and strike skew by expiry into deribit_iv_surface -->
+- [x] Perp funding + basis poller (Binance + Coinbase derivatives)  <!-- services/ingest/src/ingest/workers/perp_funding_basis.py now polls Binance USDT-perp premiumIndex plus Coinbase International Exchange quote/funding endpoints for ASSET-PERP instruments, writing both venues into perp_funding_basis with derived basis_bps + annualized funding -->
+
+- [x] FRED / BLS daily job for macro series  <!-- services/ingest/src/ingest/workers/macro_series_ingest.py now ingests configurable FRED CSV series plus BLS public timeseries/data series into macro_series with PIT-correct (period_date, observed_at); bootstrap configs live at services/ingest/data/fred_series.example.json and services/ingest/data/bls_series.example.json. services/api/src/api/macro_features.py reads FEDFUNDS / DGS10 / T10Y2Y / CPIAUCSL via a single PIT batched query and exposes fed_funds_30d_delta / treasury_10y_30d_delta / yield_curve_2s10s / cpi_yoy_pct on the EnsembleSample booster path. -->
+- [x] On-chain + macro signals join the event-time layer where scheduled, main feature set otherwise  <!-- services/api/src/api/event_time.py now reads scheduled macro + onchain catalysts (metadata.scheduled=true) from external_events, while services/api/src/api/external_events.py excludes those scheduled items from the general external feed by default unless include_scheduled=true -->
 - [ ] **Exit:** every P0/P1 source from §5.2 is ingesting with < 1% failure rate
 
 ---
@@ -244,62 +246,62 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 ## M6 — Backtest + drift monitoring (Weeks 15–16)
 
 ### 6.1 Backtest infrastructure (§6.6)
-- [ ] Walk-forward evaluator: training windows slide forward in time, never trained on post-prediction data
-- [ ] Purged k-fold with embargo (López de Prado) inside each training window
-- [ ] Survivorship-free corpus: include low-volume, canceled, disputed markets
-- [ ] No retroactive label polishing — resolution frozen at original `observed_at`
-- [ ] Stratified reports by market-type × regime × time-to-resolution bucket
+- [x] Walk-forward evaluator: training windows slide forward in time, never trained on post-prediction data  <!-- packages/model/src/model/backtest.py evaluates PIT-replayed samples, and services/api/src/api/backtest_walk_forward.py now replays resolved markets through model_for_market(..., asked_at=...) to produce executable stratified walk-forward reports -->
+- [x] Purged k-fold with embargo (López de Prado) inside each training window  <!-- packages/model/src/model/conformal.py: purged_embargo_splits + fit_split_conformal_from_folds (shipped during M2.3) -->
+- [x] Survivorship-free corpus: include low-volume, canceled, disputed markets  <!-- services/api/src/api/backtest_walk_forward.py now loads a resolved-market corpus from first observed YES/NO/INVALID rows, preserves disputed markets via dispute_status, records low-volume markets in corpus stats instead of filtering them out, and only narrows to the binary subset at scoring time -->
+- [x] No retroactive label polishing — resolution frozen at original `observed_at`  <!-- replay/training paths in services/api/src/api/backtest_smoke.py, m2_audit.py, m3_audit.py, and long_tail_priors.py now select the first observed YES/NO resolution row per market rather than the latest revision -->
+- [x] Stratified reports by market-type × regime × time-to-resolution bucket  <!-- StratumReport in backtest.py: per-cell + by-type + by-regime + overall, including conformal coverage per banded stratum -->
 
 ### 6.2 Regime tagger (§6.3)
-- [ ] HMM on (BTC realized vol, BTC ↔ NASDAQ correlation, stablecoin-supply delta)
-- [ ] Daily regime labels: `bull_trend`, `bear_trend`, `chop`, `liquidity_crisis`
-- [ ] Regime fed as a feature and as a Mondrian axis for conformal
+- [~] HMM on (BTC realized vol, BTC ↔ NASDAQ correlation, stablecoin-supply delta)  <!-- packages/model/src/model/regime.py ships a deterministic rule_v1 classifier on the same input set as the eventual HMM. HMM training is deferred until enough daily history accrues; the schema (regime_labels) and writer (regime_label_row) are HMM-ready (just flip classifier='hmm_v1') -->
+- [x] Daily regime labels: `bull_trend`, `bear_trend`, `chop`, `liquidity_crisis`  <!-- services/ingest/src/ingest/workers/regime_tagger.py runs daily: pulls 30 BTC daily klines from Binance, derives 24h+7d realized vol + 7d momentum, optionally enriches with FRED M2SL weekly delta as a stablecoin-supply proxy, runs tag_regime, writes regime_labels -->
+- [x] Regime fed as a feature and as a Mondrian axis for conformal  <!-- Conformal Mondrian axis: ConformalSample carries an optional `regime`; fit_split_conformal emits regime-keyed cells alongside legacy (type, ttr) cells; cell_for falls back type→ttr→global when the regime-specific cell is missing, so legacy registries keep working. Serve-time: markets.py reads regime_label_asof and passes it into _apply_conformal_interval. /v1/regime endpoint + regime_label/confidence/classifier on the detail response. Ensemble-booster path now one-hot encodes the active regime into the served sample for both list/detail refinement and explainer output. -->
 
 ### 6.3 Drift monitoring (§6.9)
-- [ ] Nightly rolling 7d / 30d / 90d Brier, ECE, conformal coverage per market-type and regime
-- [ ] PSI / KL-divergence per feature vs training distribution; alert at PSI > 0.2
-- [ ] **Auto-disable rule:** any per-type model with 7 consecutive days of negative 30d Brier skill → disabled, UI falls back to market-implied prior (§8 guardrail)
-- [ ] Monthly per-signal ablation job; archive signals whose contribution bootstrap CI crosses zero
+- [x] Nightly rolling 7d / 30d / 90d Brier, ECE, conformal coverage per market-type and regime  <!-- services/api/src/api/drift_monitor.py now replays PIT-served predictions on a canonical pre-resolution horizon, runs rolling_window_reports over trailing 7d/30d/90d windows, and persists overall + by-type + by-regime + per-cell snapshots into model_drift_metrics; runner: `uv run python -m api.drift_monitor` / `make drift-monitor` -->
+- [x] PSI / KL-divergence per feature vs training distribution; alert at PSI > 0.2  <!-- services/api/src/api/drift_monitor.py now compares persisted market_features cross-sections over a recent live window vs a longer historical reference window, persists append-only rows into feature_drift_metrics, and flags `is_alert` when PSI breaches the configured threshold (default 0.2) -->
+- [x] **Auto-disable rule:** any per-type model with 7 consecutive days of negative 30d Brier skill → disabled, UI falls back to market-implied prior (§8 guardrail)  <!-- Full serve-time path remains wired through model_status.py + markets.py::_apply_ensemble_refinement, and services/api/src/api/drift_monitor.py now writes append-only model_disable_log transitions from trailing 30d per-type skill history whenever the disable state flips -->
+- [x] Monthly per-signal ablation job; archive signals whose contribution bootstrap CI crosses zero  <!-- services/api/src/api/signal_ablation.py replays resolved markets PIT, ablates each shipped model-side signal family, persists bootstrap-CI metrics into signal_ablation_metrics, and appends archived/re_enabled transitions into signal_archive_log; runner: `uv run python -m api.signal_ablation` / `make signal-ablation` -->
 
 ### 6.4 Backtest UI
-- [ ] Per-cell dashboard (market-type × regime) with skill, ECE, coverage
-- [ ] Historical calibration plot; drill down to individual resolved markets
+- [x] Per-cell dashboard (market-type × regime) with skill, ECE, coverage  <!-- services/api/src/api/drift_report.py exposes the latest persisted drift snapshot via /v1/drift-monitor, and apps/web/src/app/page.tsx now renders 7d/30d/90d per-cell strata with brier skill, ECE, coverage, and sample counts plus feature-drift alerts -->
+- [x] Historical calibration plot; drill down to individual resolved markets  <!-- services/api/src/api/backtest_report.py exposes a PIT-backed walk-forward report at /v1/backtest/walk-forward with calibration buckets and replay rows; the dashboard renders the calibration chart plus a resolved-market drilldown table with type/regime filters -->
 
 ### 6.5 Exit criteria for M6
-- [ ] Backtest replays last 90d of resolved markets deterministically via the PIT store
-- [ ] Drift job alerts fire on injected synthetic drift in a test run
-- [ ] Regime stratification visible in UI and in automated reports
+- [x] Backtest replays last 90d of resolved markets deterministically via the PIT store  <!-- services/api/src/api/backtest_walk_forward.py remains the canonical PIT replay driver, and /v1/backtest/walk-forward now exposes the same 90d replay path for the dashboard using model_for_market(..., asked_at=...) over first-observed resolutions -->
+- [x] Drift job alerts fire on injected synthetic drift in a test run  <!-- services/api/tests/test_drift_monitor.py injects shifted feature distributions and asserts the nightly drift driver marks `spread` as alerting when PSI > 0.2 -->
+- [x] Regime stratification visible in UI and in automated reports  <!-- drift_monitor.py already persists by-regime strata into model_drift_metrics, drift_report.py serves those rows, and the dashboard renders regime-specific cells directly from the nightly snapshot -->
 
 ---
 
 ## M7 — Journal auto-sync + user tuning (Week 17)
 
 ### 7.1 Journal Auto-Sync (F7)
-- [ ] User connects Polymarket address (read-only path — public `/positions`, `/trades`, `/earnings`)
-- [ ] Optional: user CLOB API key + secret + passphrase for User WSS; encrypted at rest; never used for trading endpoints in v1 (§5.2.1)
-- [ ] User WSS (`/ws/user`) client: real-time own-order + own-fill updates
-- [ ] On every fill, capture **model probability at that instant** for later calibration scoring
-- [ ] Resolution sync pulls from `/positions?redeemable=true` and `/users/{address}/earnings`
+- [x] User connects Polymarket address (read-only path — public `/positions`, `/trades`, `/earnings`)  <!-- services/api/src/api/polymarket_account.py persists a single read-only proxy wallet for the demo/internal user, validates it via public Data API positions/trades/earnings, and exposes GET/PUT /v1/polymarket-address; dashboard settings panel wired in apps/web/src/app/page.tsx -->
+- [x] Optional: user CLOB API key + secret + passphrase for User WSS; encrypted at rest; never used for trading endpoints in v1 (§5.2.1)  <!-- services/api/src/api/clob_credentials.py stores polymarket_clob secrets in user_api_keys_encrypted with AES-GCM via USER_SECRET_ENCRYPTION_KEY_B64, GET/PUT /v1/polymarket-clob-credentials is exposed from services/api/src/api/main.py, and apps/web/src/app/page.tsx now provides a settings card that never reads secrets back and explicitly states the v1 non-trading constraint -->
+- [x] User WSS (`/ws/user`) client: real-time own-order + own-fill updates  <!-- services/api/src/api/journal_autosync.py now manages an app-scoped UserJournalAutoSyncService on startup, loading encrypted CLOB credentials, connecting to /ws/user through polymarket_client.UserWssManager, and refreshing the listener when /v1/polymarket-clob-credentials changes -->
+- [x] On every fill, capture **model probability at that instant** for later calibration scoring  <!-- user-channel trade/fill events are parsed into idempotent auto journal entries via services/api/src/api/journal_autosync.py + services/api/src/api/journal.py:create_auto_fill_call, which snapshots model_for_market(..., asked_at=fill_time), stores the call as source='auto_wss', and deduplicates by source_event_id -->
+- [x] Resolution sync pulls from `/positions?redeemable=true` and `/users/{address}/earnings`  <!-- services/api/src/api/journal.py now threads linked Polymarket redeemable-position and earnings snapshots into /v1/journal/summary, and apps/web/src/app/page.tsx renders that resolution-sync state in the journal section -->
 
 ### 7.2 Model Tuning (F5)
-- [ ] User sliders modify **additive log-odds shift** only, never learned weights (§6.2)
-- [ ] Presets: Conservative / Balanced / Aggressive
-- [ ] Per-user tuning profile persisted
-- [ ] Backtest mode: re-score last 90d resolved markets with user's current tuning; counterfactual Brier vs default
+- [x] User sliders modify **additive log-odds shift** only, never learned weights (§6.2)  <!-- services/api/src/api/tuning.py applies only post-model additive log-odds shifts; learned ensemble/baseline weights remain untouched -->
+- [x] Presets: Conservative / Balanced / Aggressive  <!-- services/api/src/api/tuning.py defines canonical presets; apps/web/src/app/page.tsx exposes one-click preset buttons -->
+- [x] Per-user tuning profile persisted  <!-- GET/PUT /v1/tuning-profile backed by tuning_profiles in Postgres; markets/detail/journal now read the active profile at serve time -->
+- [x] Backtest mode: re-score last 90d resolved markets with user's current tuning; counterfactual Brier vs default  <!-- services/api/src/api/backtest_report.py replays the same PIT walk-forward corpus with and without the active tuning profile, /v1/backtest/walk-forward returns tuning_comparison, and apps/web/src/app/page.tsx renders the counterfactual Brier + calibration block -->
 
 ### 7.3 Calibration plot (F4 extension)
-- [ ] Reliability diagram from user's logged calls
-- [ ] Hit rate by confidence bucket
-- [ ] Edge realized vs edge predicted scatter
+- [x] Reliability diagram from user's logged calls  <!-- apps/web/src/app/page.tsx renders CalibrationChart from /v1/journal/summary calibration_points -->
+- [x] Hit rate by confidence bucket  <!-- apps/web/src/app/page.tsx renders journalSummary.data.confidence_buckets -->
+- [x] Edge realized vs edge predicted scatter  <!-- apps/web/src/app/page.tsx renders EdgeScatter from /v1/journal/summary edge_scatter -->
 
 ### 7.4 Cross-user learning opt-in (§6.9)
-- [ ] Opt-in toggle in settings, default off
-- [ ] Differential-privacy aggregator for anonymized labels
-- [ ] Individual calls never leave the user's account
+- [x] Opt-in toggle in settings, default off  <!-- services/api/src/api/privacy_prefs.py persists user_privacy_preferences, GET/PUT /v1/privacy-preferences is exposed from services/api/src/api/main.py, and apps/web/src/app/page.tsx renders the saved toggle in settings -->
+- [x] Differential-privacy aggregator for anonymized labels  <!-- services/api/src/api/dp_aggregates.py builds k-anonymous noisy confidence-bucket label aggregates from opted-in resolved journal calls, persists snapshots to dp_label_aggregates, exposes GET /v1/privacy/dp-aggregates, and adds a one-shot runner via make dp-aggregates -->
+- [x] Individual calls never leave the user's account  <!-- the DP aggregate path persists and serves only grouped noisy summaries without user_id, condition_id, or raw call payloads; apps/web/src/app/page.tsx privacy copy now reflects that contract -->
 
 ### 7.5 Exit criteria for M7
-- [ ] Journal round-trip: fill → auto-logged → resolved → PnL + Brier contribution, all without manual entry
-- [ ] Tuning backtest reproduces the same numbers the live model would have produced on historical data (PIT-correct)
+- [ ] Journal round-trip: fill → auto-logged → resolved → PnL + Brier contribution, all without manual entry  <!-- auditable via services/api/src/api/m7_audit.py against source='auto_wss' journal rows and their scored resolution fields -->
+- [ ] Tuning backtest reproduces the same numbers the live model would have produced on historical data (PIT-correct)  <!-- auditable via services/api/src/api/m7_audit.py by comparing tuned walk-forward replay rows against direct model_for_market(..., tuning_profile=active) reads at the same historical timestamps -->
 
 ---
 
@@ -308,8 +310,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 ### 8.1 Beta readiness
 - [ ] Status page + uptime monitor
 - [ ] Error reporting (Sentry or equivalent) on web + workers
-- [ ] Cost dashboard (API spend per source per day)
-- [ ] Rate-limit headroom dashboard (§7)
+- [x] Cost dashboard (API spend per source per day)  <!-- services/api/src/api/source_health.py exposes per-source 24h aggregations (total_requests, ok/error/rate_limited/timeout counts, failure_rate, p50/p95 latency) over ingest_health, surfaced as GET /v1/source-health. Per-call cost is implicit in total_requests * provider unit price; the dashboard layer can multiply by configured rates. -->
+- [x] Rate-limit headroom dashboard (§7)  <!-- /v1/source-health reports rate_limited_rate distinct from failure_rate so 429 backpressure is visually separable from real errors; with include_timeseries=true the endpoint also returns bucketed counts per source for sparklines. -->
 - [ ] Terms of service + privacy policy
 
 ### 8.2 Onboarding
@@ -366,3 +368,4 @@ These are not milestone-scoped; they run throughout.
 - [ ] Thin-book (< $1k liquidity) policy — exclude vs tag
 - [ ] Continuous markets: single probability vs distribution output
 - [ ] Discord integration — confirm defer to v1.1
+

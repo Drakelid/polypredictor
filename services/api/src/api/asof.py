@@ -21,6 +21,8 @@ from clickhouse_connect.driver.asyncclient import AsyncClient
 class MarketSnapshotRow:
     condition_id: str
     question: str
+    description: str
+    resolution_source: str
     active: bool
     closed: bool
     volume_usdc: float
@@ -51,9 +53,9 @@ async def latest_market_snapshot_asof(
     ``observed_at <= asked_at``. ``None`` if the market didn't exist yet.
     """
     query = """
-        SELECT condition_id, question, active, closed, volume_usdc,
-               liquidity_usdc, open_interest_usdc, end_date, token_ids,
-               event_time, observed_at
+        SELECT condition_id, question, description, resolution_source,
+               active, closed, volume_usdc, liquidity_usdc, open_interest_usdc,
+               end_date, token_ids, event_time, observed_at
         FROM markets_snapshots
         WHERE condition_id = {cond:String}
           AND observed_at <= {asof:DateTime64(3)}
@@ -65,18 +67,36 @@ async def latest_market_snapshot_asof(
     if not rows:
         return None
     r = rows[0]
+    if len(r) == 11:
+        return MarketSnapshotRow(
+            condition_id=r[0],
+            question=r[1],
+            description="",
+            resolution_source="",
+            active=bool(r[2]),
+            closed=bool(r[3]),
+            volume_usdc=float(r[4]),
+            liquidity_usdc=float(r[5]),
+            open_interest_usdc=float(r[6]),
+            end_date=r[7],
+            token_ids=list(r[8]),
+            event_time=r[9],
+            observed_at=r[10],
+        )
     return MarketSnapshotRow(
         condition_id=r[0],
         question=r[1],
-        active=bool(r[2]),
-        closed=bool(r[3]),
-        volume_usdc=float(r[4]),
-        liquidity_usdc=float(r[5]),
-        open_interest_usdc=float(r[6]),
-        end_date=r[7],
-        token_ids=list(r[8]),
-        event_time=r[9],
-        observed_at=r[10],
+        description=str(r[2] or ""),
+        resolution_source=str(r[3] or ""),
+        active=bool(r[4]),
+        closed=bool(r[5]),
+        volume_usdc=float(r[6]),
+        liquidity_usdc=float(r[7]),
+        open_interest_usdc=float(r[8]),
+        end_date=r[9],
+        token_ids=list(r[10]),
+        event_time=r[11],
+        observed_at=r[12],
     )
 
 

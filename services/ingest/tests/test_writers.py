@@ -10,12 +10,14 @@ from ingest.writers import (
     ORDERBOOK_COLS,
     PRICES_HISTORY_COLS,
     QUOTES_COLS,
+    REGIME_LABELS_COLS,
     SMART_MONEY_POSITIONS_COLS,
     TRADES_COLS,
     market_row,
     orderbook_rows,
     price_history_rows,
     quote_row,
+    regime_label_row,
     smart_money_position_row,
     trade_row,
 )
@@ -206,3 +208,29 @@ def test_smart_money_position_row_shapes_leaderboard_context() -> None:
     assert by["leaderboard_vol"] == pytest.approx(250_000.0)
     assert by["event_time"] == now
     assert by["observed_at"] == now
+
+
+def test_regime_label_row_pipes_reasons_and_sets_event_time_to_midnight() -> None:
+    observed = datetime(2026, 4, 24, 12, 30, tzinfo=UTC)
+    regime_date = datetime(2026, 4, 24, tzinfo=UTC)
+    row = regime_label_row(
+        regime_date=regime_date,
+        label="bull_trend",
+        confidence=0.82,
+        btc_realized_vol_24h=0.55,
+        btc_realized_vol_7d=0.50,
+        btc_momentum_7d=0.07,
+        btc_ndx_correlation_30d=0.62,
+        stablecoin_supply_delta_7d=0.005,
+        reasons=["7d momentum +7.0% >= +4.0%", "BTC↔NDX corr = +0.62"],
+        classifier="rule_v1",
+        observed_at=observed,
+    )
+    by = dict(zip(REGIME_LABELS_COLS, row, strict=True))
+    assert by["label"] == "bull_trend"
+    assert by["confidence"] == pytest.approx(0.82)
+    assert by["btc_momentum_7d"] == pytest.approx(0.07)
+    assert by["reasons"] == "7d momentum +7.0% >= +4.0%|BTC↔NDX corr = +0.62"
+    assert by["classifier"] == "rule_v1"
+    assert by["event_time"] == datetime(2026, 4, 24, tzinfo=UTC)
+    assert by["observed_at"] == observed

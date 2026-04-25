@@ -25,6 +25,10 @@ class ConformalSample:
     predicted_prob: float
     outcome: int
     asked_at: float
+    # Optional Mondrian axis (PRD §6.2). When present the calibration set
+    # produces regime-stratified cells alongside the type/ttr cells; serving
+    # falls back to the non-regime cell when the regime key is unknown.
+    regime: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,13 +69,29 @@ class SplitConformalRegistry:
         *,
         market_type: MarketType,
         time_to_resolution_s: float | None,
+        regime: str | None = None,
     ) -> ConformalCell | None:
         bucket = ttr_bucket(time_to_resolution_s)
-        keys = [
-            mondrian_key(market_type, bucket),
-            mondrian_key(market_type, "any"),
-            mondrian_key(None, "any"),
-        ]
+        # Most-specific to least-specific. Regime-aware keys come first so
+        # they only get used when the calibration set actually had data for
+        # that (type, ttr, regime) cell; otherwise we degrade through type/ttr
+        # without regime, then through type-only, then global.
+        keys: list[str] = []
+        if regime:
+            keys.extend(
+                [
+                    mondrian_key_with_regime(market_type, bucket, regime),
+                    mondrian_key_with_regime(market_type, "any", regime),
+                    mondrian_key_with_regime(None, "any", regime),
+                ]
+            )
+        keys.extend(
+            [
+                mondrian_key(market_type, bucket),
+                mondrian_key(market_type, "any"),
+                mondrian_key(None, "any"),
+            ]
+        )
         for key in keys:
             cell = self.cells.get(key)
             if cell is not None:
@@ -86,10 +106,12 @@ class SplitConformalRegistry:
         time_to_resolution_s: float | None,
         uncertainty_multiplier: float = 1.0,
         resolution_risk_multiplier: float = 1.0,
+        regime: str | None = None,
     ) -> tuple[float, float] | None:
         cell = self.cell_for(
             market_type=market_type,
             time_to_resolution_s=time_to_resolution_s,
+            regime=regime,
         )
         if cell is None:
             return None
@@ -150,6 +172,19 @@ def mondrian_key(market_type: MarketType | None, bucket: str) -> str:
     return f"{mt}:{bucket}"
 
 
+def mondrian_key_with_regime(
+    market_type: MarketType | None,
+    bucket: str,
+    regime: str,
+) -> str:
+    """Three-segment key for the regime-aware Mondrian cell.
+
+    Kept distinct from :func:`mondrian_key` so legacy two-segment registry
+    JSONs deserialize unchanged — the regime axis is purely additive.
+    """
+    return f"{mondrian_key(market_type, bucket)}:{regime}"
+
+
 def fit_split_conformal(
     calibration_samples: list[ConformalSample],
     *,
@@ -157,6 +192,9 @@ def fit_split_conformal(
 ) -> SplitConformalRegistry:
     grouped: dict[str, list[float]] = {}
     by_type: dict[str, list[float]] = {}
+    by_regime_cell: dict[str, list[float]] = {}
+    by_type_regime: dict[str, list[float]] = {}
+    by_regime: dict[str, list[float]] = {}
     global_scores: list[float] = []
 
     for sample in calibration_samples:
@@ -167,20 +205,26 @@ def fit_split_conformal(
         grouped.setdefault(exact_key, []).append(residual)
         by_type.setdefault(type_key, []).append(residual)
         global_scores.append(residual)
+        if sample.regime:
+            regime_cell_key = mondrian_key_with_regime(
+                sample.market_type, bucket, sample.regime
+            )
+            by_regime_cell.setdefault(regime_cell_key, []).append(residual)
+            type_regime_key = mondrian_key_with_regime(
+                sample.market_type, "any", sample.regime
+            )
+            by_type_regime.setdefault(type_regime_key, []).append(residual)
+            global_regime_key = mondrian_key_with_regime(None, "any", sample.regime)
+            by_regime.setdefault(global_regime_key, []).append(residual)
 
     cells: dict[str, ConformalCell] = {}
-    for key, scores in grouped.items():
-        cells[key] = ConformalCell(
-            key=key,
-            quantile=_conformal_quantile(scores, coverage),
-            sample_count=len(scores),
-        )
-    for key, scores in by_type.items():
-        cells[key] = ConformalCell(
-            key=key,
-            quantile=_conformal_quantile(scores, coverage),
-            sample_count=len(scores),
-        )
+    for source in (grouped, by_type, by_regime_cell, by_type_regime, by_regime):
+        for key, scores in source.items():
+            cells[key] = ConformalCell(
+                key=key,
+                quantile=_conformal_quantile(scores, coverage),
+                sample_count=len(scores),
+            )
     if global_scores:
         global_key = mondrian_key(None, "any")
         cells[global_key] = ConformalCell(
