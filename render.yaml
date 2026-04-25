@@ -1,0 +1,139 @@
+services:
+  - type: web
+    name: polypredictor-api-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: LOG_LEVEL
+        value: INFO
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: password
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: polypredictor-redis-staging
+          property: connectionString
+      - key: CLICKHOUSE_HOST
+        sync: false
+      - key: CLICKHOUSE_PORT
+        value: "8123"
+      - key: CLICKHOUSE_DB
+        value: polypredictor
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: USER_SECRET_ENCRYPTION_KEY_B64
+        generateValue: true
+      - key: CME_API_ID
+        sync: false
+      - key: CME_API_SECRET
+        sync: false
+      - key: GLASSNODE_API_KEY
+        sync: false
+      - key: DUNE_API_KEY
+        sync: false
+
+  - type: web
+    name: polypredictor-web-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./apps/web/Dockerfile
+    dockerContext: .
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: NEXT_PUBLIC_API_BASE
+        sync: false
+      - key: API_BASE
+        sync: false
+
+  - type: worker
+    name: polypredictor-ingest-discovery-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.gamma_discovery
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: polypredictor-redis-staging
+          property: connectionString
+      - key: CLICKHOUSE_HOST
+        sync: false
+      - key: CLICKHOUSE_PORT
+        value: "8123"
+      - key: CLICKHOUSE_DB
+        value: polypredictor
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+
+  - type: worker
+    name: polypredictor-ingest-clob-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.clob_poller
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: LOG_LEVEL
+        value: INFO
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: polypredictor-redis-staging
+          property: connectionString
+      - key: CLICKHOUSE_HOST
+        sync: false
+      - key: CLICKHOUSE_PORT
+        value: "8123"
+      - key: CLICKHOUSE_DB
+        value: polypredictor
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+
+  - type: keyvalue
+    name: polypredictor-redis-staging
+    plan: starter
+    ipAllowList: []
+
+databases:
+  - name: polypredictor-postgres-staging
+    plan: starter
+    databaseName: polypredictor
+    user: polypredictor

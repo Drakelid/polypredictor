@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from clickhouse_connect.driver.asyncclient import AsyncClient
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field
 
 from . import asof as asof_q
 from . import backtest_report as backtest_report_q
+from . import beta_onboarding as beta_onboarding_q
 from . import clob_credentials as clob_credentials_q
 from . import concentration as concentration_q
 from . import dp_aggregates as dp_aggregates_q
 from . import drift_report as drift_report_q
+from . import error_reports as error_reports_q
 from . import event_time as event_time_q
 from . import external_events as external_events_q
 from . import features as features_q
@@ -25,12 +27,13 @@ from . import journal_autosync as journal_autosync_q
 from . import markets as markets_q
 from . import onchain_metrics as onchain_metrics_q
 from . import polymarket_account as polymarket_account_q
-from . import source_health as source_health_q
 from . import privacy_prefs as privacy_prefs_q
 from . import push_prefs as push_prefs_q
 from . import regime as regime_q
 from . import signals as signals_q
 from . import smart_money as smart_money_q
+from . import source_health as source_health_q
+from . import system_status as system_status_q
 from . import tuning as tuning_q
 from .clickhouse import get_async_client
 from .postgres import get_async_pool
@@ -102,10 +105,170 @@ class TuningProfileRequest(BaseModel):
     log_odds_shifts: dict[str, float] = Field(default_factory=dict)
 
 
+class ErrorReportRequest(BaseModel):
+    source: str = Field(pattern="^(web|api|worker)$")
+    severity: str = Field(default="error", pattern="^(info|warning|error|fatal)$")
+    message: str = Field(min_length=1, max_length=2_000)
+    stack: str | None = Field(default=None, max_length=20_000)
+    url: str | None = Field(default=None, max_length=2_000)
+    user_agent: str | None = Field(default=None, max_length=1_000)
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class BetaInviteRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: str | None = Field(default=None, max_length=200)
+
+
+class BetaFeedbackRequest(BaseModel):
+    kind: str = Field(default="other", pattern="^(bug|idea|model|data|other)$")
+    message: str = Field(min_length=1, max_length=5_000)
+    page_url: str | None = Field(default=None, max_length=2_000)
+    condition_id: str | None = Field(default=None, max_length=200)
+    contact_email: str | None = Field(default=None, max_length=320)
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     s = get_settings()
     return {"status": "ok", "env": s.app_env}
+
+
+@app.get("/v1/status")
+async def system_status(
+    ch: AsyncClient = Depends(get_ch),
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    status = await system_status_q.build_system_status(
+        ch=ch,
+        pool=pg,
+        settings=get_settings(),
+    )
+    return {
+        "state": status.state,
+        "checked_at": status.checked_at.isoformat(),
+        "components": [
+            {
+                "name": component.name,
+                "state": component.state,
+                "detail": component.detail,
+                "last_observed_at": (
+                    component.last_observed_at.isoformat()
+                    if component.last_observed_at is not None
+                    else None
+                ),
+            }
+            for component in status.components
+        ],
+    }
+
+
+@app.post("/v1/error-reports", status_code=202)
+async def create_error_report(
+    payload: ErrorReportRequest,
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    try:
+        report = await error_reports_q.record_error_report(
+            pool=pg,
+            settings=get_settings(),
+            payload=error_reports_q.ErrorReportInput(
+                source=cast(error_reports_q.ErrorSource, payload.source),
+                severity=cast(error_reports_q.ErrorSeverity, payload.severity),
+                message=payload.message,
+                stack=payload.stack,
+                url=payload.url,
+                user_agent=payload.user_agent,
+                context=payload.context,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": str(report.id),
+        "source": report.source,
+        "severity": report.severity,
+        "reported_at": report.reported_at.isoformat(),
+    }
+
+
+@app.get("/v1/beta/invites")
+async def beta_invites(
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    summary = await beta_onboarding_q.beta_invite_summary(
+        pool=pg,
+        settings=get_settings(),
+    )
+    return {
+        "target_count": summary.target_count,
+        "invited_count": summary.invited_count,
+        "accepted_count": summary.accepted_count,
+        "remaining_slots": summary.remaining_slots,
+        "invites": [
+            {
+                "id": str(invite.id),
+                "email": invite.email,
+                "display_name": invite.display_name,
+                "status": invite.status,
+                "invited_at": invite.invited_at.isoformat(),
+                "accepted_at": (
+                    invite.accepted_at.isoformat()
+                    if invite.accepted_at is not None
+                    else None
+                ),
+            }
+            for invite in summary.invites
+        ],
+    }
+
+
+@app.post("/v1/beta/invites")
+async def create_beta_invite(
+    payload: BetaInviteRequest,
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    try:
+        invite = await beta_onboarding_q.create_beta_invite(
+            pool=pg,
+            email=payload.email,
+            display_name=payload.display_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": str(invite.id),
+        "email": invite.email,
+        "display_name": invite.display_name,
+        "status": invite.status,
+        "invited_at": invite.invited_at.isoformat(),
+        "accepted_at": invite.accepted_at.isoformat() if invite.accepted_at else None,
+    }
+
+
+@app.post("/v1/beta/feedback", status_code=202)
+async def create_beta_feedback(
+    payload: BetaFeedbackRequest,
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    try:
+        receipt = await beta_onboarding_q.submit_feedback(
+            pool=pg,
+            payload=beta_onboarding_q.FeedbackInput(
+                kind=cast(beta_onboarding_q.FeedbackKind, payload.kind),
+                message=payload.message,
+                page_url=payload.page_url,
+                condition_id=payload.condition_id,
+                contact_email=payload.contact_email,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "id": str(receipt.id),
+        "kind": receipt.kind,
+        "submitted_at": receipt.submitted_at.isoformat(),
+    }
 
 
 @app.get("/v1/markets/{condition_id}/asof")
@@ -256,6 +419,7 @@ async def event_time_asof(
 @app.get("/v1/markets")
 async def markets_list(
     limit: int = Query(200, ge=1, le=500),
+    crypto_only: bool = Query(default=True),
     ch: AsyncClient = Depends(get_ch),
     pg: Any = Depends(get_pg),
 ) -> list[dict[str, Any]]:
@@ -272,6 +436,7 @@ async def markets_list(
         ch,
         asked_at=asked_at,
         limit=limit,
+        crypto_only=crypto_only,
         tuning_profile=tuning_profile,
     )
     return [

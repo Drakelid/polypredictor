@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     signal_ablation_bootstrap_iterations: int = 500
     signal_ablation_ci_level: float = 0.95
     signal_ablation_min_samples: int = 50
+    status_source_lookback_hours: int = 24
+    status_source_failure_rate_threshold: float = 0.01
+    status_source_staleness_minutes: int = 30
+    beta_invite_target_count: int = 20
     resolution_risk_corpus_limit: int = 5000
     resolution_risk_corpus_lookback_days: int = 3650
     resolution_risk_multiplier_default: float = 1.0

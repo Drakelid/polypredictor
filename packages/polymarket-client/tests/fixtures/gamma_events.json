@@ -1,0 +1,19 @@
+[
+  {
+    "id": "btc-weekly",
+    "slug": "btc-weekly-close",
+    "title": "Bitcoin weekly close markets",
+    "tags": ["Crypto", "Bitcoin"],
+    "markets": [
+      {
+        "conditionId": "0xbtc150",
+        "eventId": "btc-weekly",
+        "question": "Will Bitcoin be above $150,000 on December 31?",
+        "slug": "bitcoin-above-150000-december-31",
+        "active": true,
+        "closed": false,
+        "clobTokenIds": "[\"tok-yes-btc150\", \"tok-no-btc150\"]"
+      }
+    ]
+  }
+]

@@ -4,7 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
+  createBetaInvite,
   fetchBacktestSnapshot,
+  fetchBetaInvites,
   fetchDriftSnapshot,
   fetchPrivacyPreferences,
   fetchPushPreferences,
@@ -15,8 +17,10 @@ import {
   fetchPolymarketClobCredentials,
   fetchSignals,
   fetchTuningProfile,
+  submitBetaFeedback,
   type BacktestCalibrationPoint,
   type BacktestReplayRow,
+  type BetaInviteSummary,
   type DriftMetricRow,
   type FeatureDriftMetricRow,
   updatePushPreferences,
@@ -143,6 +147,8 @@ const TUNING_PRESETS: Array<{ preset: TuningProfile["preset"]; label: string }> 
 
 export default function DashboardPage() {
   const queryClient = useQueryClient();
+  const [cryptoOnly, setCryptoOnly] = useState(true);
+  const [showTour, setShowTour] = useState(false);
   const [signalType, setSignalType] = useState("all");
   const [signalConditionId, setSignalConditionId] = useState("");
   const [signalMinSeverity, setSignalMinSeverity] = useState("0");
@@ -163,10 +169,20 @@ export default function DashboardPage() {
     passphrase: "",
     proxy_wallet: "",
   });
+  const [inviteForm, setInviteForm] = useState({ email: "", display_name: "" });
+  const [feedbackForm, setFeedbackForm] = useState<{
+    kind: "bug" | "idea" | "model" | "data" | "other";
+    message: string;
+    contact_email: string;
+  }>({ kind: "other", message: "", contact_email: "" });
   const { data, isLoading, error } = useQuery({
-    queryKey: ["markets"],
-    queryFn: fetchMarkets,
+    queryKey: ["markets", cryptoOnly],
+    queryFn: () => fetchMarkets({ cryptoOnly }),
     refetchInterval: 5_000,
+  });
+  const betaInvites = useQuery({
+    queryKey: ["beta-invites"],
+    queryFn: fetchBetaInvites,
   });
   const pushPrefs = useQuery({
     queryKey: ["push-preferences"],
@@ -274,6 +290,23 @@ export default function DashboardPage() {
       await queryClient.invalidateQueries({ queryKey: ["polymarket-clob-credentials"] });
     },
   });
+  const saveBetaInvite = useMutation({
+    mutationFn: createBetaInvite,
+    onSuccess: async () => {
+      setInviteForm({ email: "", display_name: "" });
+      await queryClient.invalidateQueries({ queryKey: ["beta-invites"] });
+    },
+  });
+  const sendFeedback = useMutation({
+    mutationFn: submitBetaFeedback,
+    onSuccess: () => {
+      setFeedbackForm((current) => ({ ...current, message: "" }));
+    },
+  });
+
+  useEffect(() => {
+    setShowTour(window.localStorage.getItem("polypredictor:onboarding-tour") !== "done");
+  }, []);
 
   useEffect(() => {
     if (pushPrefs.data) {
@@ -327,11 +360,95 @@ export default function DashboardPage() {
   return (
     <main className="mx-auto max-w-6xl p-6">
       <header className="mb-6">
-        <h1 className="text-2xl font-semibold">PolyPredictor</h1>
-        <p className="text-sm text-gray-400">
-          Crypto &amp; finance Polymarket markets with model-vs-market edge.
-        </p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">PolyPredictor</h1>
+            <p className="text-sm text-gray-400">
+              Crypto &amp; finance Polymarket markets with model-vs-market edge.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-gray-200"
+              onClick={() => setShowTour(true)}
+            >
+              Tour
+            </button>
+            <Link
+              href="/status"
+              className="rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-gray-200"
+            >
+              Status
+            </Link>
+          </div>
+        </div>
       </header>
+
+      {showTour && (
+        <section className="mb-6 rounded border border-sky-800 bg-sky-950/20 p-4">
+          <div className="mb-3 flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-semibold text-sky-100">Beta tour</div>
+              <div className="text-xs text-sky-300">
+                Market dashboard, detail pages, signal feed, and journal workflow.
+              </div>
+            </div>
+            <button
+              type="button"
+              className="rounded border border-sky-700 px-3 py-1 text-xs text-sky-100"
+              onClick={() => {
+                window.localStorage.setItem("polypredictor:onboarding-tour", "done");
+                setShowTour(false);
+              }}
+            >
+              Done
+            </button>
+          </div>
+          <div className="grid gap-3 text-sm text-sky-100 md:grid-cols-4">
+            <TourStep title="Dashboard" body="Scan crypto markets by model edge and risk badge." />
+            <TourStep title="Detail" body="Open a market for probability bands, drivers, and journal actions." />
+            <TourStep title="Signals" body="Filter whale flow, arb, large prints, and book shocks by weight." />
+            <TourStep title="Journal" body="Track calls, calibration, realized edge, and linked wallet sync." />
+          </div>
+        </section>
+      )}
+
+      <section className="mb-6 grid gap-4 md:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="rounded border border-gray-800 bg-gray-900/40 p-4">
+          <div className="mb-3 flex items-center justify-between text-xs uppercase tracking-wide text-gray-500">
+            <span>Market Scope</span>
+            <span>{cryptoOnly ? "crypto default" : "all tracked markets"}</span>
+          </div>
+          <label className="flex items-start gap-3 text-sm text-gray-300">
+            <input
+              type="checkbox"
+              checked={cryptoOnly}
+              onChange={(event) => setCryptoOnly(event.target.checked)}
+            />
+            <span>
+              Crypto-only filter
+              <span className="mt-1 block text-xs text-gray-500">
+                Closed beta starts with crypto markets by default; turn this off to include the broader finance set.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <BetaInviteCard
+          summary={betaInvites.data}
+          form={inviteForm}
+          onFormChange={setInviteForm}
+          onSubmit={() =>
+            saveBetaInvite.mutate({
+              email: inviteForm.email,
+              display_name: inviteForm.display_name || null,
+            })
+          }
+          isSaving={saveBetaInvite.isPending}
+          error={saveBetaInvite.error as Error | null}
+        />
+      </section>
 
       {journalSummary.data && (
         <section className="mb-6 space-y-4">
@@ -1085,6 +1202,82 @@ export default function DashboardPage() {
         </section>
       )}
 
+      <section className="mb-6 rounded border border-gray-800 bg-gray-900/40 p-4">
+        <div className="mb-3 flex items-center justify-between text-xs uppercase tracking-wide text-gray-500">
+          <span>Beta Feedback</span>
+          <span>{sendFeedback.isSuccess ? "received" : "in-app capture"}</span>
+        </div>
+        <div className="grid gap-4 md:grid-cols-[180px_minmax(0,1fr)_220px]">
+          <label className="block text-xs text-gray-400">
+            <div className="mb-1 uppercase tracking-wide text-gray-500">Type</div>
+            <select
+              value={feedbackForm.kind}
+              onChange={(event) =>
+                setFeedbackForm({
+                  ...feedbackForm,
+                  kind: event.target.value as typeof feedbackForm.kind,
+                })
+              }
+              className="w-full rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-white outline-none"
+            >
+              <option value="bug">Bug</option>
+              <option value="idea">Idea</option>
+              <option value="model">Model</option>
+              <option value="data">Data</option>
+              <option value="other">Other</option>
+            </select>
+          </label>
+          <label className="block text-xs text-gray-400">
+            <div className="mb-1 uppercase tracking-wide text-gray-500">Message</div>
+            <textarea
+              value={feedbackForm.message}
+              onChange={(event) =>
+                setFeedbackForm({ ...feedbackForm, message: event.target.value })
+              }
+              rows={3}
+              placeholder="What happened, what felt unclear, or what should change?"
+              className="w-full resize-none rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-white outline-none placeholder:text-gray-600"
+            />
+          </label>
+          <label className="block text-xs text-gray-400">
+            <div className="mb-1 uppercase tracking-wide text-gray-500">Contact</div>
+            <input
+              value={feedbackForm.contact_email}
+              onChange={(event) =>
+                setFeedbackForm({ ...feedbackForm, contact_email: event.target.value })
+              }
+              placeholder="optional email"
+              className="w-full rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-white outline-none placeholder:text-gray-600"
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="text-xs text-gray-500">
+            Feedback is stored with the current page URL so beta issues can be traced quickly.
+          </div>
+          <button
+            type="button"
+            className="rounded border border-sky-700/60 bg-sky-900/30 px-4 py-2 text-sm text-sky-200 disabled:opacity-50"
+            disabled={sendFeedback.isPending || !feedbackForm.message.trim()}
+            onClick={() =>
+              sendFeedback.mutate({
+                kind: feedbackForm.kind,
+                message: feedbackForm.message,
+                page_url: window.location.href,
+                contact_email: feedbackForm.contact_email || null,
+              })
+            }
+          >
+            {sendFeedback.isPending ? "Sending..." : "Send feedback"}
+          </button>
+        </div>
+        {sendFeedback.error && (
+          <div className="mt-2 text-sm text-edge-bearish">
+            {(sendFeedback.error as Error).message}
+          </div>
+        )}
+      </section>
+
       {driftSnapshot.data && driftSnapshot.data.model_metrics.length > 0 && (
         <section className="mb-6">
           <div className="rounded border border-gray-800 bg-gray-900/40 p-4">
@@ -1438,6 +1631,86 @@ function FeatureDriftRow({ row }: { row: FeatureDriftMetricRow }) {
       <div className="mt-1 text-xs text-gray-500">
         KL {row.kl_divergence.toFixed(3)} · ref {row.reference_count} · live {row.current_count}
       </div>
+    </div>
+  );
+}
+
+function TourStep({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="rounded border border-sky-800/70 bg-black/20 p-3">
+      <div className="font-medium">{title}</div>
+      <div className="mt-1 text-xs leading-5 text-sky-200">{body}</div>
+    </div>
+  );
+}
+
+function BetaInviteCard({
+  summary,
+  form,
+  onFormChange,
+  onSubmit,
+  isSaving,
+  error,
+}: {
+  summary: BetaInviteSummary | undefined;
+  form: { email: string; display_name: string };
+  onFormChange: (next: { email: string; display_name: string }) => void;
+  onSubmit: () => void;
+  isSaving: boolean;
+  error: Error | null;
+}) {
+  return (
+    <div className="rounded border border-gray-800 bg-gray-900/40 p-4">
+      <div className="mb-3 flex items-center justify-between text-xs uppercase tracking-wide text-gray-500">
+        <span>Closed Beta</span>
+        <span>
+          {summary
+            ? `${summary.invited_count}/${summary.target_count} invited`
+            : "loading"}
+        </span>
+      </div>
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <input
+          value={form.email}
+          onChange={(event) => onFormChange({ ...form, email: event.target.value })}
+          placeholder="invite@example.com"
+          className="rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-white outline-none placeholder:text-gray-600"
+        />
+        <input
+          value={form.display_name}
+          onChange={(event) =>
+            onFormChange({ ...form, display_name: event.target.value })
+          }
+          placeholder="name optional"
+          className="rounded border border-gray-700 bg-black/20 px-3 py-2 text-sm text-white outline-none placeholder:text-gray-600"
+        />
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="text-xs text-gray-500">
+          {summary
+            ? `${summary.accepted_count} accepted · ${summary.remaining_slots} slots left`
+            : "Tracking the initial invited-user cohort."}
+        </div>
+        <button
+          type="button"
+          className="rounded border border-sky-700/60 bg-sky-900/30 px-3 py-2 text-sm text-sky-200 disabled:opacity-50"
+          disabled={isSaving || !form.email.trim()}
+          onClick={onSubmit}
+        >
+          {isSaving ? "Adding..." : "Add invite"}
+        </button>
+      </div>
+      {summary?.invites.length ? (
+        <div className="mt-3 max-h-28 space-y-1 overflow-auto text-xs text-gray-400">
+          {summary.invites.slice(0, 5).map((invite) => (
+            <div key={invite.id} className="flex items-center justify-between gap-3">
+              <span className="truncate">{invite.email}</span>
+              <span>{invite.status}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {error && <div className="mt-2 text-sm text-edge-bearish">{error.message}</div>}
     </div>
   );
 }

@@ -1,0 +1,47 @@
+name: Deploy staging
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+jobs:
+  render:
+    name: Trigger Render deploy hooks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    environment: staging
+    env:
+      API_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_API_STAGING }}
+      WEB_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_WEB_STAGING }}
+      INGEST_DISCOVERY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_INGEST_DISCOVERY_STAGING }}
+      INGEST_CLOB_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_INGEST_CLOB_STAGING }}
+    steps:
+      - name: Trigger API deploy
+        if: env.API_HOOK != ''
+        run: curl --fail-with-body --request POST "$API_HOOK"
+
+      - name: Trigger web deploy
+        if: env.WEB_HOOK != ''
+        run: curl --fail-with-body --request POST "$WEB_HOOK"
+
+      - name: Trigger discovery worker deploy
+        if: env.INGEST_DISCOVERY_HOOK != ''
+        run: curl --fail-with-body --request POST "$INGEST_DISCOVERY_HOOK"
+
+      - name: Trigger CLOB worker deploy
+        if: env.INGEST_CLOB_HOOK != ''
+        run: curl --fail-with-body --request POST "$INGEST_CLOB_HOOK"
+
+      - name: Explain skipped hooks
+        if: env.API_HOOK == '' || env.WEB_HOOK == '' || env.INGEST_DISCOVERY_HOOK == '' || env.INGEST_CLOB_HOOK == ''
+        run: |
+          echo "One or more Render deploy-hook secrets are not configured."
+          echo "Set RENDER_DEPLOY_HOOK_API_STAGING, RENDER_DEPLOY_HOOK_WEB_STAGING,"
+          echo "RENDER_DEPLOY_HOOK_INGEST_DISCOVERY_STAGING, and RENDER_DEPLOY_HOOK_INGEST_CLOB_STAGING."

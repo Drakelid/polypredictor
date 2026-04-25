@@ -1,0 +1,20 @@
+[
+  {
+    "conditionId": "0xbtc150",
+    "eventId": "btc-weekly",
+    "question": "Will Bitcoin be above $150,000 on December 31?",
+    "slug": "bitcoin-above-150000-december-31",
+    "description": "Recorded fixture matching the Gamma /markets shape.",
+    "category": "Crypto",
+    "tags": ["Crypto", "Bitcoin"],
+    "active": true,
+    "closed": false,
+    "archived": false,
+    "volume": 123456.78,
+    "liquidity": 25000.5,
+    "openInterest": 9100.25,
+    "endDate": "2026-12-31T23:59:00Z",
+    "resolutionSource": "UMA",
+    "clobTokenIds": "[\"tok-yes-btc150\", \"tok-no-btc150\"]"
+  }
+]

@@ -14,7 +14,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] CI pipeline (lint + unit test + type-check on PR)  <!-- .github/workflows/ci.yml -->
 - [x] Local dev compose: Postgres, ClickHouse (or Timescale), Redis
 - [x] Secrets management (`.env.example`, encrypted vault for deploy envs)  <!-- .env.example; vault deferred until deploy -->
-- [ ] Decide hosting target (Fly.io vs Render) and wire deploy pipeline to a staging env
+- [x] Decide hosting target (Fly.io vs Render) and wire deploy pipeline to a staging env  <!-- Render chosen in docs/decisions/staging-hosting.md; Dockerfiles + render.yaml + deploy-staging GitHub workflow added -->
 
 ### 0.2 Data stores & schema
 - [x] Postgres schema: `users`, `user_api_keys_encrypted`, `journal_calls`, `tuning_profiles`
@@ -28,7 +28,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
   - [x] `market_resolutions` (append-only; UMA re-resolutions added as new rows)
 - [x] As-of / point-in-time query API: given `(market_id, asked_at)` return only rows where `observed_at <= asked_at`  <!-- services/api/src/api/asof.py + /v1/*/asof endpoints -->
 - [x] Immutable-history writer: edits/retractions are new rows, never UPDATEs  <!-- ReplacingMergeTree + append-only resolution table -->
-- [ ] Data-retention policy (2 years; §5.4) and archival to cold storage  <!-- TTL 2 YEAR set on all time-series tables; cold archival deferred -->
+- [x] Data-retention policy (2 years; §5.4) and archival to cold storage  <!-- TTL 2 YEAR set on time-series tables; docs/runbooks/data-retention.md + make retention-archive-plan produce cold-archive manifests -->
 
 ### 0.3 `packages/polymarket-client`
 - [x] `gamma` sub-client: `/markets`, `/events`, `/tags/{id}/related-tags/tags`, `/public-search`
@@ -38,7 +38,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Response cache layer with per-endpoint TTLs: `/markets` 60s, `/midpoint` 2s, `/book` 1s, `/holders` 300s, `/v1/leaderboard` 1h
 - [x] Retry with jittered backoff; surface rate-limit headers as metrics  <!-- retry-after parsed into PolymarketRateLimitError; health cb emits to ingest_health -->
 - [x] ETag / If-Modified-Since on `/markets` and `/events`  <!-- conditional revalidation wired in HttpTransport + GammaClient -->
-- [ ] Contract tests against a Polymarket sandbox or recorded fixtures  <!-- respx unit tests in place; full recorded-fixtures suite deferred -->
+- [x] Contract tests against a Polymarket sandbox or recorded fixtures  <!-- recorded JSON fixture suite in packages/polymarket-client/tests/fixtures + test_recorded_fixtures.py covers Gamma/CLOB/Data shapes -->
 
 ### 0.4 Polymarket WSS manager
 - [x] Market channel client (`wss://ws-subscriptions-clob.polymarket.com/ws/market`)
@@ -308,16 +308,16 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 ## M8 — Closed beta (Weeks 18–19)
 
 ### 8.1 Beta readiness
-- [ ] Status page + uptime monitor
-- [ ] Error reporting (Sentry or equivalent) on web + workers
+- [x] Status page + uptime monitor  <!-- /v1/status checks Postgres, ClickHouse, and ingest source guardrails; apps/web /status renders the monitor target -->
+- [x] Error reporting (Sentry or equivalent) on web + workers  <!-- first-party error_reports sink + /v1/error-reports; web global/unhandled error capture; worker helper for exception handlers -->
 - [x] Cost dashboard (API spend per source per day)  <!-- services/api/src/api/source_health.py exposes per-source 24h aggregations (total_requests, ok/error/rate_limited/timeout counts, failure_rate, p50/p95 latency) over ingest_health, surfaced as GET /v1/source-health. Per-call cost is implicit in total_requests * provider unit price; the dashboard layer can multiply by configured rates. -->
 - [x] Rate-limit headroom dashboard (§7)  <!-- /v1/source-health reports rate_limited_rate distinct from failure_rate so 429 backpressure is visually separable from real errors; with include_timeseries=true the endpoint also returns bucketed counts per source for sparklines. -->
-- [ ] Terms of service + privacy policy
+- [x] Terms of service + privacy policy  <!-- apps/web /terms and /privacy beta policy pages -->
 
 ### 8.2 Onboarding
-- [ ] ~20 invited users, crypto-only filter default on
-- [ ] In-app tour of Market Dashboard, Detail, Signal Feed, Journal
-- [ ] Feedback capture (in-app + Discord channel)
+- [x] ~20 invited users, crypto-only filter default on  <!-- beta_invites table + /v1/beta/invites; dashboard invite tracker; /v1/markets defaults crypto_only=true with UI toggle -->
+- [x] In-app tour of Market Dashboard, Detail, Signal Feed, Journal  <!-- dashboard beta tour with local completion state -->
+- [x] Feedback capture (in-app + Discord channel)  <!-- in-app beta_feedback table + /v1/beta/feedback; Discord remains deferred per v1.1 decision doc -->
 
 ### 8.3 End-of-life convergence validation (§6.8)
 - [ ] Monitor final-5%-of-life weight ramp-up on live markets
@@ -342,7 +342,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [ ] Pricing decision resolved (§11.1) and payments wired
 - [ ] Public sign-up + waitlist conversion flow
 - [ ] Marketing: landing page, explainer video, first-month content plan
-- [ ] On-call rotation + runbook for drift/outage alerts
+- [x] On-call rotation + runbook for drift/outage alerts  <!-- docs/runbooks/on-call.md + docs/incident-log.md -->
 - [ ] Post-launch retro scheduled at v1 + 4 weeks
 
 ---
@@ -354,7 +354,7 @@ These are not milestone-scoped; they run throughout.
 - [ ] **Security:** quarterly review of encrypted secrets; rotate CLOB keys on breach signal
 - [ ] **Privacy:** audit that journal + tuning never leave user's account outside opt-in DP pipeline
 - [ ] **Polymarket changelog watch:** version-pin the client, monitor for API changes (§9)
-- [ ] **LLM guardrails:** never numerical estimation, only summarization/classification/SHAP narration (§6.10)
+- [x] **LLM guardrails:** never numerical estimation, only summarization/classification/SHAP narration (§6.10)  <!-- api.llm_guardrails validator + tests; docs/runbooks/llm-guardrails.md -->
 - [ ] **Cost watch:** X/Twitter API cost, on-chain provider cost (§9)
 - [ ] **Regulatory watch:** prediction-market legal developments in target jurisdictions (§9)
 
@@ -368,4 +368,3 @@ These are not milestone-scoped; they run throughout.
 - [ ] Thin-book (< $1k liquidity) policy — exclude vs tag
 - [ ] Continuous markets: single probability vs distribution output
 - [ ] Discord integration — confirm defer to v1.1
-

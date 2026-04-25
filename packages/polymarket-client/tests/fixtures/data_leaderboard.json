@@ -1,0 +1,11 @@
+{
+  "items": [
+    {
+      "proxyWallet": "0x1111111111111111111111111111111111111111",
+      "username": "fixture-wallet",
+      "rank": 1,
+      "pnl": 12000.5,
+      "volume": 540000.75
+    }
+  ]
+}

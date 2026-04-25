@@ -72,6 +72,9 @@ class IngestSettings(BaseSettings):
     spot_validation_assets: str = "BTC,ETH,SOL"
     spot_validation_max_deviation_bps: float = 50.0
     spot_validation_min_venues: int = 2
+    retention_years: int = 2
+    retention_cold_archive_after_years: int = 1
+    retention_cold_archive_uri: str | None = None
 
     # Ingest cadence
     discover_interval_s: float = 60.0

@@ -264,6 +264,38 @@ async def _latest_markets(
     return out
 
 
+def _is_crypto_market(snap: dict[str, object]) -> bool:
+    category = str(snap.get("category") or "").lower()
+    tags = [str(tag).lower() for tag in snap.get("tags") or []]  # type: ignore[union-attr]
+    text = " ".join(
+        [
+            category,
+            str(snap.get("question") or "").lower(),
+            str(snap.get("slug") or "").lower(),
+            " ".join(tags),
+        ]
+    )
+    crypto_terms = {
+        "crypto",
+        "bitcoin",
+        "btc",
+        "ethereum",
+        "eth",
+        "solana",
+        "sol",
+        "xrp",
+        "doge",
+        "binance",
+        "coinbase",
+        "stablecoin",
+        "usdt",
+        "usdc",
+        "defi",
+        "etf",
+    }
+    return any(term in text for term in crypto_terms)
+
+
 async def _latest_mids_for_tokens(
     ch: AsyncClient, token_ids: list[str], asked_at: datetime
 ) -> dict[str, float]:
@@ -892,12 +924,16 @@ async def list_markets(
     *,
     asked_at: datetime,
     limit: int = 200,
+    crypto_only: bool = False,
     tuning_profile: TuningProfile | None = None,
 ) -> list[MarketListRow]:
     all_snaps = await _latest_markets(ch, asked_at, limit=max(limit, 500))
     if not all_snaps:
         return []
-    snaps = all_snaps[:limit]
+    visible_snaps = [snap for snap in all_snaps if _is_crypto_market(snap)] if crypto_only else all_snaps
+    snaps = visible_snaps[:limit]
+    if not snaps:
+        return []
     settings = get_settings()
 
     all_tokens: list[str] = []

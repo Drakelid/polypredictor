@@ -73,9 +73,12 @@ export type MarketRow = {
   thin_book?: boolean;
 };
 
-export async function fetchMarkets(): Promise<MarketRow[]> {
+export async function fetchMarkets(options: { cryptoOnly?: boolean } = {}): Promise<MarketRow[]> {
+  const qs = new URLSearchParams({
+    crypto_only: String(options.cryptoOnly ?? true),
+  });
   try {
-    return await getJson<MarketRow[]>("/v1/markets");
+    return await getJson<MarketRow[]>(`/v1/markets?${qs}`);
   } catch {
     return [];
   }
@@ -657,6 +660,77 @@ export async function fetchBacktestSnapshot(
       tuning_comparison: null,
     };
   }
+}
+
+export type SystemStatus = {
+  state: "operational" | "degraded" | "down" | "unknown";
+  checked_at: string;
+  components: Array<{
+    name: string;
+    state: "operational" | "degraded" | "down" | "unknown";
+    detail: string;
+    last_observed_at: string | null;
+  }>;
+};
+
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  return getJson<SystemStatus>("/v1/status");
+}
+
+export async function reportClientError(payload: {
+  message: string;
+  stack?: string | null;
+  url?: string | null;
+  user_agent?: string | null;
+  context?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await postJson("/v1/error-reports", {
+      source: "web",
+      severity: "error",
+      ...payload,
+    });
+  } catch {
+    // Error reporting must never create a second user-visible failure.
+  }
+}
+
+export type BetaInvite = {
+  id: string;
+  email: string;
+  display_name: string | null;
+  status: string;
+  invited_at: string;
+  accepted_at: string | null;
+};
+
+export type BetaInviteSummary = {
+  target_count: number;
+  invited_count: number;
+  accepted_count: number;
+  remaining_slots: number;
+  invites: BetaInvite[];
+};
+
+export async function fetchBetaInvites(): Promise<BetaInviteSummary> {
+  return getJson<BetaInviteSummary>("/v1/beta/invites");
+}
+
+export async function createBetaInvite(payload: {
+  email: string;
+  display_name?: string | null;
+}): Promise<BetaInvite> {
+  return postJson<BetaInvite>("/v1/beta/invites", payload);
+}
+
+export async function submitBetaFeedback(payload: {
+  kind: "bug" | "idea" | "model" | "data" | "other";
+  message: string;
+  page_url?: string | null;
+  condition_id?: string | null;
+  contact_email?: string | null;
+}): Promise<{ id: string; kind: string; submitted_at: string }> {
+  return postJson("/v1/beta/feedback", payload);
 }
 
 export async function createJournalCall(payload: {

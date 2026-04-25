@@ -1,4 +1,4 @@
-.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics drift-monitor signal-ablation resolution-risk-corpus dp-aggregates m7-audit
+.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics retention-archive-plan drift-monitor signal-ablation resolution-risk-corpus dp-aggregates m7-audit
 
 help:
 	@echo "Common targets:"
@@ -28,6 +28,7 @@ help:
 	@echo "  make ingest-macro-series # run FRED/BLS macro series ingestion once"
 	@echo "  make ingest-perp-funding # run Binance/Coinbase perp funding+basis poller once"
 	@echo "  make ingest-onchain-metrics # run Glassnode/Dune on-chain ingestion once"
+	@echo "  make retention-archive-plan # write cold-storage archive manifest"
 	@echo "  make drift-monitor    # run nightly drift metrics + auto-disable driver once"
 	@echo "  make signal-ablation # run monthly per-signal ablation + archive driver once"
 	@echo "  make resolution-risk-corpus # build the resolution-risk training corpus once"
@@ -113,6 +114,9 @@ ingest-perp-funding:
 
 ingest-onchain-metrics:
 	uv run python -c "import asyncio; from ingest.workers.onchain_metrics import run_once; count = asyncio.run(run_once()); print(f'wrote {count} onchain metric rows')"
+
+retention-archive-plan:
+	uv run python -m ingest.retention --manifest artifacts/retention/archive-manifest.json
 
 drift-monitor:
 	uv run python -m api.drift_monitor

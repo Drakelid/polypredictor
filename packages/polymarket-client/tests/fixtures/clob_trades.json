@@ -1,0 +1,11 @@
+[
+  {
+    "trade_id": "trade-1",
+    "token_id": "tok-yes-btc150",
+    "market": "0xbtc150",
+    "price": 0.42,
+    "size": 100.0,
+    "side": "BUY",
+    "timestamp": "2026-02-02T12:00:00Z"
+  }
+]

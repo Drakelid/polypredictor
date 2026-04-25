@@ -1,0 +1,14 @@
+{
+  "market": "0xbtc150",
+  "asset_id": "tok-yes-btc150",
+  "bids": [
+    { "price": "0.41", "size": "1250.5" },
+    { "price": "0.40", "size": "500" }
+  ],
+  "asks": [
+    { "price": "0.43", "size": "1100" },
+    { "price": "0.44", "size": "750.25" }
+  ],
+  "hash": "book-fixture-hash",
+  "timestamp": 1770000000000
+}
