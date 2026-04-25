@@ -73,7 +73,33 @@ _DOLLAR_RE = re.compile(
 _NUMBER_PATTERN = r"\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?"
 _OPTIONAL_MAG_SUFFIX_PATTERN = r"(?:\s*(?P<mag>[kKmMbB]))?(?![A-Za-z])"
 
+# Expanded threshold keywords to capture more natural phrasing.
+# Order matters: place longer phrases before shorter ones so specific patterns match first.
+# Expanded threshold keywords to capture more natural phrasing.
+# Order matters: place longer phrases before shorter ones so specific patterns match first.
 _THRESHOLD_KEYWORDS = (
+    # Inclusive and colloquial phrases (multi-word)
+    "no less than",
+    "not less than",
+    "no more than",
+    "not more than",
+    "at least",
+    "at most",
+    "less than or equal to",
+    "less than or equal",
+    "less or equal to",
+    "greater than or equal to",
+    "greater than or equal",
+    "at or above",
+    "at or below",
+    "or more",
+    "or less",
+    # Symbolic operators and their plain-text equivalents
+    ">=",
+    "<=",
+    "≥",
+    "≤",
+    # Single-word/shorter phrases
     "above",
     "over",
     "greater than",
@@ -91,11 +117,37 @@ _THRESHOLD_KEYWORDS = (
     "<",
 )
 
-_BELOW_KEYWORDS = {"below", "under", "less than", "lower than", "<"}
+# Keywords that imply a "below" direction. These are matched case-insensitively.
+_BELOW_KEYWORDS = {
+    # Phrases that indicate a "below" or "at most" type direction.
+    "below",
+    "under",
+    "less than",
+    "lower than",
+    "<",
+    "<=",
+    "≤",
+    "no more than",
+    "not more than",
+    "at most",
+    "at or below",
+    "less than or equal",
+    "less than or equal to",
+    "less or equal to",
+    "or less",
+}
 
+# Range matcher: support "between X and Y", "from X to Y", and hyphenated ranges like "X - Y".
 _RANGE_RE = re.compile(
-    rf"between\s+\$?(?P<lo>{_NUMBER_PATTERN})(?:\s*(?P<lo_mag>[kKmMbB]))?(?![A-Za-z])"
-    rf"\s+and\s+\$?(?P<hi>{_NUMBER_PATTERN})(?:\s*(?P<hi_mag>[kKmMbB]))?(?![A-Za-z])",
+    rf"(?:between|from)\s+\$?(?P<lo>{_NUMBER_PATTERN})(?:\s*(?P<lo_mag>[kKmMbB]))?(?![A-Za-z])"
+    # Allow 'and', 'to' or a hyphen between bounds with optional whitespace around the separator.
+    rf"\s*(?:and|to|-)\s*\$?(?P<hi>{_NUMBER_PATTERN})(?:\s*(?P<hi_mag>[kKmMbB]))?(?![A-Za-z])",
+    re.IGNORECASE,
+)
+
+# Additional pattern to catch hyphenated ranges without an explicit prefix (e.g. "20k-30k").
+_RANGE_HYPHEN_RE = re.compile(
+    rf"\$?(?P<lo>{_NUMBER_PATTERN})(?:\s*(?P<lo_mag>[kKmMbB]))?\s*-\s*\$?(?P<hi>{_NUMBER_PATTERN})(?:\s*(?P<hi_mag>[kKmMbB]))?(?![A-Za-z])",
     re.IGNORECASE,
 )
 
@@ -158,18 +210,26 @@ def _find_strike(text: str) -> tuple[float, str] | None:
         )
         m = pattern.search(text)
         if m:
+            # Determine direction based on the keyword's membership in the below-set. Defaults to 'above'.
             direction = "below" if kw.lower() in _BELOW_KEYWORDS else "above"
             return _parse_dollar(m.group("num"), m.group("mag")), direction
     return None
 
 
 def _find_range(text: str) -> tuple[float, float] | None:
+    # First try the explicit range pattern (between/from X and/to Y).
     m = _RANGE_RE.search(text)
-    if not m:
-        return None
-    lo = _parse_dollar(m.group("lo"), m.group("lo_mag"))
-    hi = _parse_dollar(m.group("hi"), m.group("hi_mag"))
-    return (min(lo, hi), max(lo, hi))
+    if m:
+        lo = _parse_dollar(m.group("lo"), m.group("lo_mag"))
+        hi = _parse_dollar(m.group("hi"), m.group("hi_mag"))
+        return (min(lo, hi), max(lo, hi))
+    # Fall back to hyphenated ranges if an asset is present nearby; this helps avoid matching year ranges.
+    m2 = _RANGE_HYPHEN_RE.search(text)
+    if m2:
+        lo = _parse_dollar(m2.group("lo"), m2.group("lo_mag"))
+        hi = _parse_dollar(m2.group("hi"), m2.group("hi_mag"))
+        return (min(lo, hi), max(lo, hi))
+    return None
 
 
 # --- Classifier entrypoint --------------------------------------------------
