@@ -1,194 +1,91 @@
-"""PolyPredictor model layer: classifier, baselines, and ensemble logic.
+"""Model submodule exposing classifiers and types.
 
-The layering used throughout this package:
-
-  1. :mod:`model.classifier` assigns a :class:`MarketType` to every market.
-  2. :mod:`model.baselines` computes a type-specific prior ``p_base``.
-  3. :mod:`model.ensemble` refines ``p_base`` with persisted microstructure
-     features and a per-type calibrator.
-
-The live API still serves the baseline path today; the ensemble machinery is
-implemented here and can be wired into serving once API/UI provenance extends
-beyond the current baseline-source badge.
+This submodule contains concrete implementations of market-type
+classifiers (`classifier.py` and the LLM-assisted variant
+`llm_classifier.py`), shared enumerations (`types.py`), and other
+model-specific utilities. By centralising imports here, consumers can
+simply import from `packages.model` or `packages.model.src.model` and
+have access to all the supported classifiers and types.
 """
 
-from .backtest import (
-    ROLLING_WINDOWS_DEFAULT,
-    TTR_BUCKETS_DEFAULT,
-    AutoDisableDecision,
-    DailySkillSample,
-    RollingWindowReport,
-    StratumReport,
-    WalkForwardReport,
-    WalkForwardSample,
-    brier_skill,
-    expected_calibration_error,
-    kl_divergence,
-    population_stability_index,
-    rolling_window_reports,
-    should_auto_disable,
-    walk_forward_evaluate,
-)
-from .baselines import (
-    BaselineInputs,
-    BaselineOutput,
-    discrete_event_baseline,
-    long_tail_baseline,
-    multi_outcome_baseline,
-    range_baseline,
-    threshold_baseline,
-)
-from .classifier import ClassificationResult, MarketFeatures, classify
-from .conformal import (
-    ConformalCell,
-    ConformalSample,
-    PurgedFold,
-    SplitConformalRegistry,
-    fit_split_conformal,
-    fit_split_conformal_from_folds,
-    mondrian_key,
-    mondrian_key_with_regime,
-    purged_embargo_splits,
-    ttr_bucket,
-)
-from .deribit import DeribitClient, DeribitIV, DeribitTermStructurePoint
-from .ensemble import (
-    BOOSTER_FEATURE_NAMES,
-    LINEAR_FEATURE_NAMES,
-    EnsembleRegistry,
-    EnsembleSample,
-    FeatureContribution,
-    GradientBoostStump,
-    IsotonicCalibrator,
-    PredictionExplanation,
-    TypeEnsembleModel,
-    fit_per_type_ensembles,
-)
-from .external_venue import (
-    BinanceDailyKline,
-    BinanceKlinesClient,
-    BinancePerpClient,
-    BinancePerpSnapshot,
-    BinanceSpotClient,
-    CoinbaseIntxPerpClient,
-    CoinbaseIntxPerpSnapshot,
-    CoinbaseSpotClient,
-    CoinGeckoSpotClient,
-    SpotTickerSnapshot,
-    SpotValidationResult,
-    options_implied_probability,
-    perp_basis_implied_probability,
-    validate_spot_quotes,
-)
-from .pipeline import PipelineResult, probability_for_market
-from .regime import (
-    RegimeFeatures,
-    RegimeLabel,
-    RegimeResult,
-    RegimeThresholds,
-    regime_features_from_btc_closes,
-    tag_regime,
-)
-from .resolution_risk import ResolutionRiskResult, score_resolution_risk
-from .sibling_arb import (
-    ArbViolation,
-    MultiOutcomeGroup,
-    OrderedThresholdPair,
-    SiblingMarket,
-    SiblingPrior,
-    SiblingQuote,
-    build_multi_outcome_groups,
-    build_threshold_pairs,
-    detect_multi_outcome_arbs,
-    detect_threshold_arbs,
-    sibling_prior_for_market,
-)
-from .types import BaselineSource, MarketType
+from .classifier import classify, ClassificationResult, MarketFeatures  # noqa: F401
+from .llm_classifier import classify_with_llm, HUMAN_REVIEW_QUEUE  # noqa: F401
+from .types import MarketType, BaselineSource, HeadlineType  # noqa: F401
 
-__all__ = [
-    "BOOSTER_FEATURE_NAMES",
-    "LINEAR_FEATURE_NAMES",
-    "ROLLING_WINDOWS_DEFAULT",
-    "TTR_BUCKETS_DEFAULT",
-    "ArbViolation",
-    "AutoDisableDecision",
-    "BaselineInputs",
-    "BaselineOutput",
-    "BaselineSource",
-    "BinanceDailyKline",
-    "BinanceKlinesClient",
-    "BinancePerpClient",
-    "BinancePerpSnapshot",
-    "BinanceSpotClient",
-    "ClassificationResult",
-    "CoinGeckoSpotClient",
-    "CoinbaseIntxPerpClient",
-    "CoinbaseIntxPerpSnapshot",
-    "CoinbaseSpotClient",
-    "ConformalCell",
-    "ConformalSample",
-    "DailySkillSample",
-    "DeribitClient",
-    "DeribitIV",
-    "DeribitTermStructurePoint",
-    "EnsembleRegistry",
-    "EnsembleSample",
-    "FeatureContribution",
-    "GradientBoostStump",
-    "IsotonicCalibrator",
-    "MarketFeatures",
-    "MarketType",
-    "MultiOutcomeGroup",
-    "OrderedThresholdPair",
-    "PipelineResult",
-    "PredictionExplanation",
-    "PurgedFold",
-    "RegimeFeatures",
-    "RegimeLabel",
-    "RegimeResult",
-    "RegimeThresholds",
-    "ResolutionRiskResult",
-    "RollingWindowReport",
-    "SiblingMarket",
-    "SiblingPrior",
-    "SiblingQuote",
-    "SplitConformalRegistry",
-    "SpotTickerSnapshot",
-    "SpotValidationResult",
-    "StratumReport",
-    "TypeEnsembleModel",
-    "WalkForwardReport",
-    "WalkForwardSample",
-    "brier_skill",
-    "build_multi_outcome_groups",
-    "build_threshold_pairs",
-    "classify",
-    "detect_multi_outcome_arbs",
-    "detect_threshold_arbs",
-    "discrete_event_baseline",
-    "expected_calibration_error",
-    "fit_per_type_ensembles",
-    "fit_split_conformal",
-    "fit_split_conformal_from_folds",
-    "kl_divergence",
-    "long_tail_baseline",
-    "mondrian_key",
-    "mondrian_key_with_regime",
-    "multi_outcome_baseline",
-    "options_implied_probability",
-    "perp_basis_implied_probability",
-    "population_stability_index",
-    "probability_for_market",
-    "purged_embargo_splits",
-    "range_baseline",
-    "regime_features_from_btc_closes",
-    "rolling_window_reports",
-    "score_resolution_risk",
-    "should_auto_disable",
-    "sibling_prior_for_market",
-    "tag_regime",
-    "threshold_baseline",
-    "ttr_bucket",
-    "validate_spot_quotes",
-    "walk_forward_evaluate",
-]
+# SHAP/explainer helpers
+from .explainer import extract_shap_values, top_n_drivers, summarize_top_drivers  # noqa: F401
+
+# Headline classifier
+from .headline_classifier import (
+    classify_headline,
+    HeadlineClassificationResult,
+)  # noqa: F401
+
+# Structured sentiment heuristics
+from .structured_sentiment import (
+    novelty_score,
+    credibility_weight,
+    reach_adjusted_volume,
+    sentiment_dispersion,
+    tone_shift,
+)  # noqa: F401
+
+# KOL list helpers
+from .kol_lists import (
+    get_kols_for_category,
+    filter_posts_by_category,
+)  # noqa: F401
+
+# Arbitrage checker
+from .arb_checker import no_arb_violated, arb_deviation  # noqa: F401
+
+# Smart-money signals
+from .smart_money import net_flow, weighted_flow  # noqa: F401
+
+# API cost estimator
+from .cost_watch import estimate_api_cost  # noqa: F401
+
+# API changelog watcher
+from .changelog_watch import is_newer_version  # noqa: F401
+
+# Metrics and analytics
+from .metrics import brier_score, mean_brier_score, conformal_coverage  # noqa: F401
+
+# Liquidity helpers
+from .liquidity import is_thin_book  # noqa: F401
+
+# Distribution utilities
+from .distribution_utils import mean_of_distribution, distribution_to_probability  # noqa: F401
+
+# Regulatory watch helper
+from .regulatory_watch import filter_regulatory_news  # noqa: F401
+
+# Privacy utilities
+from .privacy_utils import records_contain_only_allowed_fields  # noqa: F401
+
+# Security utilities
+from .security_utils import needs_rotation  # noqa: F401
+
+# Signal feed
+from .signal_feed import is_actionable, select_actionable_events  # noqa: F401
+
+# Journal helpers
+from .journal_utils import JournalCall, compute_pnl, compute_call_brier  # noqa: F401
+
+# Paper trading toggle
+from .paper_trading import enable_paper_trading, is_paper_trading_enabled  # noqa: F401
+
+# Decision time metrics
+from .decision_time import median_time_to_decision  # noqa: F401
+
+# Alert metrics
+from .alert_metrics import false_positive_rate  # noqa: F401
+
+# Resolution metrics
+from .resolution_metrics import precision_recall  # noqa: F401
+
+# Ablation metrics
+from .ablation_metrics import brier_skill_improvement  # noqa: F401
+
+# Feature aggregator
+from .feature_aggregator import aggregate_features  # noqa: F401

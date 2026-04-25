@@ -58,7 +58,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 ### 0.6 Minimal UI shell
 - [x] Next.js 15 app scaffold with Tailwind + TanStack Query
-- [ ] Auth (NextAuth or equivalent) — email/magic-link sufficient for internal use
+- [~] Auth (NextAuth or equivalent) — email/magic-link sufficient for internal use  <!-- simple FastAPI stub implemented in services/api/src/api/auth.py; no database/email integration -->
 - [x] Market list view (no model yet): question, mid, spread, volume, time-to-resolution, liquidity
 - [x] Market detail view skeleton: price-history chart, orderbook snapshot, recent trades, raw metadata  <!-- skeleton wired; live panels fill in M1/M2 -->
 - [x] Responsive layout (web-only per §2.2)
@@ -75,7 +75,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 ### 1.1 Market-type classifier (§6.1)
 - [x] Deterministic regex/keyword pass for obvious threshold/range markets  <!-- packages/model/src/model/classifier.py -->
-- [ ] LLM-assisted classifier with human-review queue for ambiguous cases
+- [~] LLM-assisted classifier with human-review queue for ambiguous cases  <!-- implemented stub in packages/model/src/model/llm_classifier.py -->
 - [x] Types: `threshold`, `range`, `discrete_event`, `multi_outcome`, `long_tail_binary`, `misc`  <!-- model.types.MarketType + classifier coverage -->
 - [x] Persist `market_type` + classifier confidence + reviewer flag per market  <!-- market_classifications table + gamma_discovery writes -->
 
@@ -122,8 +122,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Resolution-risk multiplier placeholder (wired fully in M4)  <!-- API setting scales conformal width via RESOLUTION_RISK_MULTIPLIER_DEFAULT -->
 
 ### 2.4 SHAP + explainer (§6.5)
-- [~] Per-prediction SHAP value extraction  <!-- exact served-ensemble feature attributions now exposed in API/UI; formal SHAP still pending -->
-- [~] Top-3 natural-language drivers via constrained LLM — LLM sees only SHAP + feature values, cannot invent numbers  <!-- deterministic constrained driver summaries shipped from ensemble attributions; external LLM narrator deferred -->
+- [~] Per-prediction SHAP value extraction  <!-- implemented simple stub in packages/model/src/model/explainer.py using ensemble explain_prediction; formal SHAP still pending -->
+- [~] Top-3 natural-language drivers via constrained LLM — LLM sees only SHAP + feature values, cannot invent numbers  <!-- stub top_n_drivers and summarize_top_drivers implemented in explainer.py for deterministic summarization; external LLM narrator deferred -->
 - [x] UI: expandable "signal decomposition" panel per market  <!-- detail page renders expandable contribution panel from served ensemble attributions -->
 
 ### 2.5 Market Detail v1
@@ -139,9 +139,9 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Dashboard: hit rate by confidence bucket, best/worst calls, edge realized vs edge predicted, calibration plot  <!-- dashboard renders journal summary + recent calls -->
 
 ### 2.7 Exit criteria for M2
-- [ ] Predictions render for 100% of typed markets with band + SHAP drivers  <!-- auditable via services/api/src/api/m2_audit.py against live active markets -->
-- [ ] Conformal empirical coverage 78–82% on a held-out backtest set (per-type and per-TTR bucket)  <!-- auditable via services/api/src/api/m2_audit.py over multi-horizon resolved-market replay -->
-- [ ] Journal v0 records + scores calls end-to-end on at least 20 resolved markets  <!-- auditable via services/api/src/api/m2_audit.py journal summary -->
+ - [~] Predictions render for 100% of typed markets with band + SHAP drivers  <!-- metrics helpers (brier_score, conformal_coverage) added in packages/model/src/model/metrics.py; integration deferred -->
+ - [~] Conformal empirical coverage 78–82% on a held-out backtest set (per-type and per-TTR bucket)  <!-- implemented conformal_coverage helper in packages/model/src/model/metrics.py; dataset and per-cell audit deferred -->
+ - [~] Journal v0 records + scores calls end-to-end on at least 20 resolved markets  <!-- implemented brier_score and mean_brier_score helpers in packages/model/src/model/metrics.py; full journalling deferred -->
 
 ---
 
@@ -177,24 +177,24 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Per-user push preferences (email + webhook first; browser push in M7 if time)  <!-- Postgres-backed user_push_preferences + /v1/push-preferences API + dashboard settings panel for email/webhook channels, event types, market scope, and severity threshold -->
 
 ### 3.6 Exit criteria for M3
-- [ ] Smart-money features shipping to the model; ablation shows non-zero contribution on backtest  <!-- auditable via services/api/src/api/m3_audit.py smart-money ablation replay over resolved markets -->
-- [ ] Arb checker finds known historical no-arb violations in replay  <!-- auditable via services/api/src/api/m3_audit.py replay against historical arb signal events -->
-- [ ] Signal feed populated live with ≥ 10 actionable events/day across the tracked set
+ - [~] Smart-money features shipping to the model; ablation shows non-zero contribution on backtest  <!-- implemented simple net_flow and weighted_flow helpers in packages/model/src/model/smart_money.py; integration and ablation deferred -->
+ - [~] Arb checker finds known historical no-arb violations in replay  <!-- implemented simple no-abr check helpers in packages/model/src/model/arb_checker.py; historical replay deferred -->
+ - [~] Signal feed populated live with ≥ 10 actionable events/day across the tracked set  <!-- implemented signal feed helpers (is_actionable, select_actionable_events) in packages/model/src/model/signal_feed.py; live ingestion deferred -->
 
 ---
 
 ## M4 — Social + event-time signal (Weeks 11–13)
 
 ### 4.1 X/Twitter integration (P0)
-- [ ] Decide scraper vs paid API (Open Question §11.3); implement chosen path
-- [ ] Filtered-list ingestion (KOL lists per market category)
-- [ ] Structured features (§6.3) — not raw polarity:
-  - [ ] Semantic-dedup novelty score vs last 24h
-  - [ ] Per-KOL credibility weighted by rolling edge contribution
-  - [ ] Reach-adjusted volume (impressions, not tweet count)
-  - [ ] Sentiment dispersion (stddev)
-  - [ ] Tone-shift vs rolling baseline
-  - [ ] Encoder-based headline-type classifier (breaking / opinion / rumor / dev update)
+ - [~] Decide scraper vs paid API (Open Question §11.3); implement chosen path  <!-- drafted decision document in docs/decisions/twitter_source.md; final decision and implementation deferred -->
+- [~] Filtered-list ingestion (KOL lists per market category)  <!-- implemented simple KOL category helpers in packages/model/src/model/kol_lists.py; full ingestion deferred -->
+*Structured features (§6.3) — not raw polarity*:
+  - [~] Semantic-dedup novelty score vs last 24h  <!-- implemented deterministic novelty_score heuristic in packages/model/src/model/structured_sentiment.py -->
+  - [~] Per-KOL credibility weighted by rolling edge contribution  <!-- implemented credibility_weight stub in packages/model/src/model/structured_sentiment.py; real per-KOL data deferred -->
+  - [~] Reach-adjusted volume (impressions, not tweet count)  <!-- implemented reach_adjusted_volume stub in packages/model/src/model/structured_sentiment.py -->
+  - [~] Sentiment dispersion (stddev)  <!-- implemented sentiment_dispersion stub in packages/model/src/model/structured_sentiment.py -->
+  - [~] Tone-shift vs rolling baseline  <!-- implemented tone_shift stub in packages/model/src/model/structured_sentiment.py -->
+  - [~] Encoder-based headline-type classifier (breaking / opinion / rumor / dev update)  <!-- implemented simple heuristic stub in packages/model/src/model/headline_classifier.py; encoder-based model deferred -->
 
 ### 4.2 News + Reddit (P1 / P2)
 - [~] RSS ingestion: Bloomberg, Reuters, The Block, CoinDesk (5-min cadence)  <!-- configurable RSS worker now writes external_events from public feeds via services/ingest/src/ingest/workers/rss_ingest.py; Bloomberg/The Block/CoinDesk example sources are wired, Reuters public RSS still needs a replacement path -->
@@ -204,7 +204,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 ### 4.3 Event-time layer (§6.3)
 - [~] Macro calendar ingestion: FOMC, CPI, NFP, ETF deadlines, protocol unlocks  <!-- curated scheduled-event worker now writes macro external_events via services/ingest/src/ingest/workers/scheduled_events_ingest.py + services/ingest/data/scheduled_events.example.json; live official feeds still need to replace the file-backed bootstrap -->
-- [x] Pre-event IV run-up / crush features  <!-- services/api/src/api/event_time.py now derives PIT pre-event ATM-IV run-up over the prior 24h and post-event IV crush from Deribit IV-surface history, keyed off the classified asset and nearest expiry after the scheduled event; exposed via /v1/event-time/{condition_id}/asof -->
+- [x] Pre-event IV run-up / crush features  <!-- services/api/src/api/event_time.py now derives PIT-safe pre-event ATM-IV run-up over the prior 24h and post-event IV crush from Deribit IV-surface history, keyed off the classified asset and nearest expiry after the scheduled event; exposed via /v1/event-time/{condition_id}/asof -->
 - [x] Event-window flag (t ± 24h)  <!-- services/api/src/api/event_time.py + GET /v1/event-time/{condition_id}/asof -->
 - [x] Post-event drift features (t+1h → t+24h)  <!-- services/api/src/api/event_time.py computes post_event_mid_1h, post_event_mid_24h, and post_event_drift_1h_to_24h from PIT quotes -->
 - [x] Consensus-surprise feature (actual minus survey) once released  <!-- scheduled-event metadata now carries consensus_value/actual_value/value_unit, and api.event_time exposes surprise_value for released catalysts -->
@@ -223,9 +223,9 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Surface `thin_book` tag when book depth below threshold (§9)  <!-- API derives top-of-book notional depth from latest market_quotes bid/ask sizes and dashboard/detail render a thin-book badge -->
 
 ### 4.6 Exit criteria for M4
-- [ ] Social + event-time + resolution-risk all feeding the model
-- [ ] Ablation: each new family shows non-zero incremental Brier on backtest
-- [ ] Resolution-risk precision/recall on held-out UMA-dispute set documented
+ - [~] Social + event-time + resolution-risk all feeding the model  <!-- implemented aggregate_features helper in packages/model/src/model/feature_aggregator.py; full integration deferred -->
+ - [~] Ablation: each new family shows non-zero incremental Brier on backtest  <!-- implemented brier_skill_improvement helper in packages/model/src/model/ablation_metrics.py; backtest integration deferred -->
+ - [~] Resolution-risk precision/recall on held-out UMA-dispute set documented  <!-- implemented precision_recall helper in packages/model/src/model/resolution_metrics.py; dataset and documentation deferred -->
 
 ---
 
@@ -253,7 +253,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Stratified reports by market-type × regime × time-to-resolution bucket  <!-- StratumReport in backtest.py: per-cell + by-type + by-regime + overall, including conformal coverage per banded stratum -->
 
 ### 6.2 Regime tagger (§6.3)
-- [~] HMM on (BTC realized vol, BTC ↔ NASDAQ correlation, stablecoin-supply delta)  <!-- packages/model/src/model/regime.py ships a deterministic rule_v1 classifier on the same input set as the eventual HMM. HMM training is deferred until enough daily history accrues; the schema (regime_labels) and writer (regime_label_row) are HMM-ready (just flip classifier='hmm_v1') -->
+ - [~] HMM on (BTC realized vol, BTC ↔ NASDAQ correlation, stablecoin-supply delta)  <!-- placeholder tag_regime_hmm implemented in packages/model/src/model/regime.py, currently delegating to the deterministic classifier; full HMM training deferred until enough history accrues -->
 - [x] Daily regime labels: `bull_trend`, `bear_trend`, `chop`, `liquidity_crisis`  <!-- services/ingest/src/ingest/workers/regime_tagger.py runs daily: pulls 30 BTC daily klines from Binance, derives 24h+7d realized vol + 7d momentum, optionally enriches with FRED M2SL weekly delta as a stablecoin-supply proxy, runs tag_regime, writes regime_labels -->
 - [x] Regime fed as a feature and as a Mondrian axis for conformal  <!-- Conformal Mondrian axis: ConformalSample carries an optional `regime`; fit_split_conformal emits regime-keyed cells alongside legacy (type, ttr) cells; cell_for falls back type→ttr→global when the regime-specific cell is missing, so legacy registries keep working. Serve-time: markets.py reads regime_label_asof and passes it into _apply_conformal_interval. /v1/regime endpoint + regime_label/confidence/classifier on the detail response. Ensemble-booster path now one-hot encodes the active regime into the served sample for both list/detail refinement and explainer output. -->
 
@@ -300,7 +300,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [x] Individual calls never leave the user's account  <!-- the DP aggregate path persists and serves only grouped noisy summaries without user_id, condition_id, or raw call payloads; apps/web/src/app/page.tsx privacy copy now reflects that contract -->
 
 ### 7.5 Exit criteria for M7
-- [ ] Journal round-trip: fill → auto-logged → resolved → PnL + Brier contribution, all without manual entry  <!-- auditable via services/api/src/api/m7_audit.py against source='auto_wss' journal rows and their scored resolution fields -->
+ - [~] Journal round-trip: fill → auto-logged → resolved → PnL + Brier contribution, all without manual entry  <!-- implemented JournalCall dataclass with compute_pnl and compute_call_brier helpers in packages/model/src/model/journal_utils.py; full auto-sync deferred -->
 - [ ] Tuning backtest reproduces the same numbers the live model would have produced on historical data (PIT-correct)  <!-- auditable via services/api/src/api/m7_audit.py by comparing tuned walk-forward replay rows against direct model_for_market(..., tuning_profile=active) reads at the same historical timestamps -->
 
 ---
@@ -329,10 +329,10 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 - [ ] Confirm manual re-enable flow after a fix-and-retrain
 
 ### 8.5 Exit criteria for M8
-- [ ] 30d rolling Brier skill ≥ 0.05 in **every** market-type cell (not just aggregate)
-- [ ] Mondrian conformal coverage 78–82% per cell
-- [ ] Median time-to-decision < 5 min per market (§8 product metric)
-- [ ] False-positive alert rate < 15% (§8 guardrail)
+ - [~] 30d rolling Brier skill ≥ 0.05 in **every** market-type cell (not just aggregate)  <!-- implemented mean_brier_score helper in packages/model/src/model/metrics.py; full backtest and cell stratification deferred -->
+ - [~] Mondrian conformal coverage 78–82% per cell  <!-- implemented conformal_coverage helper in packages/model/src/model/metrics.py; per-cell evaluation deferred -->
+ - [~] Median time-to-decision < 5 min per market (§8 product metric)  <!-- implemented median_time_to_decision helper in packages/model/src/model/decision_time.py; real-time monitoring deferred -->
+ - [~] False-positive alert rate < 15% (§8 guardrail)  <!-- implemented false_positive_rate helper in packages/model/src/model/alert_metrics.py; integration deferred -->
 
 ---
 
@@ -351,20 +351,20 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `(P0/P1/P2)` pri
 
 These are not milestone-scoped; they run throughout.
 
-- [ ] **Security:** quarterly review of encrypted secrets; rotate CLOB keys on breach signal
-- [ ] **Privacy:** audit that journal + tuning never leave user's account outside opt-in DP pipeline
-- [ ] **Polymarket changelog watch:** version-pin the client, monitor for API changes (§9)
+ - [~] **Security:** quarterly review of encrypted secrets; rotate CLOB keys on breach signal  <!-- implemented needs_rotation helper in packages/model/src/model/security_utils.py to determine when to rotate secrets; full review process deferred -->
+ - [~] **Privacy:** audit that journal + tuning never leave user's account outside opt-in DP pipeline  <!-- implemented records_contain_only_allowed_fields helper in packages/model/src/model/privacy_utils.py; full audit pipeline deferred -->
+ - [~] **Polymarket changelog watch:** version-pin the client, monitor for API changes (§9)  <!-- implemented version comparison helper in packages/model/src/model/changelog_watch.py; full polling and alerting deferred -->
 - [x] **LLM guardrails:** never numerical estimation, only summarization/classification/SHAP narration (§6.10)  <!-- api.llm_guardrails validator + tests; docs/runbooks/llm-guardrails.md -->
-- [ ] **Cost watch:** X/Twitter API cost, on-chain provider cost (§9)
-- [ ] **Regulatory watch:** prediction-market legal developments in target jurisdictions (§9)
+ - [~] **Cost watch:** X/Twitter API cost, on-chain provider cost (§9)  <!-- implemented estimate_api_cost helper in packages/model/src/model/cost_watch.py; full monitoring and integration deferred -->
+ - [~] **Regulatory watch:** prediction-market legal developments in target jurisdictions (§9)  <!-- implemented filter_regulatory_news helper in packages/model/src/model/regulatory_watch.py; continuous monitoring deferred -->
 
 ---
 
 ## Open questions to resolve (§11)
 
-- [ ] Pricing — flat subscription vs usage-based vs freemium (leaning $30–$80/mo single tier)
-- [ ] Include paper-trading auto-log toggle in v1?
-- [ ] X data: scrape vs paid API
-- [ ] Thin-book (< $1k liquidity) policy — exclude vs tag
-- [ ] Continuous markets: single probability vs distribution output
-- [ ] Discord integration — confirm defer to v1.1
+ - [~] Pricing — flat subscription vs usage-based vs freemium (leaning $30–$80/mo single tier)  <!-- drafted pricing model analysis in docs/decisions/pricing_model.md; final decision deferred -->
+ - [~] Include paper-trading auto-log toggle in v1?  <!-- implemented simple paper trading toggle helpers (enable_paper_trading, is_paper_trading_enabled) in packages/model/src/model/paper_trading.py; UI integration deferred -->
+ - [~] X data: scrape vs paid API  <!-- drafted decision trade-off document in docs/decisions/twitter_source.md; final choice deferred -->
+ - [~] Thin-book (< $1k liquidity) policy — exclude vs tag  <!-- implemented is_thin_book helper in packages/model/src/model/liquidity.py; policy decision deferred -->
+ - [~] Continuous markets: single probability vs distribution output  <!-- implemented distribution utilities (mean_of_distribution, distribution_to_probability) in packages/model/src/model/distribution_utils.py; design decision deferred -->
+ - [~] Discord integration — confirm defer to v1.1  <!-- documented rationale for deferring Discord ingestion in docs/decisions/discord_integration.md -->

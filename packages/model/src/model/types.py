@@ -36,3 +36,30 @@ class BaselineSource(StrEnum):
     BASE_RATE = "base_rate"              # historical frequency
     UNIFORM = "uniform"                  # uninformative 50/50 fallback
     MARKET_MID = "market_mid"            # when no baseline can be computed
+
+
+class HeadlineType(StrEnum):
+    """Coarse categorisation of news headlines used in social sentiment features.
+
+    This enumeration maps a given news or social headline into one of a handful
+    of high-level types. See PRD §6.3 for rationale: distinguishing true
+    breaking news from opinion pieces or rumours helps de-bias the sentiment
+    signal. The classifier defined in :mod:`headline_classifier` currently uses
+    simple keyword heuristics to approximate these categories. Future work
+    could replace the heuristics with an encoder-based model.
+    """
+
+    BREAKING = "breaking"
+    """Breaking news: factual, time-sensitive announcements (e.g. "Breaking: Fed hikes rates")."""
+
+    OPINION = "opinion"
+    """Opinion or analysis pieces (e.g. columns, think pieces, editorial commentary)."""
+
+    RUMOR = "rumor"
+    """Rumours or unconfirmed reports often signalled by question marks or speculative phrasing."""
+
+    DEV_UPDATE = "dev_update"
+    """Developer updates such as software release notes or protocol development news."""
+
+    OTHER = "other"
+    """Default bucket for headlines that do not match any of the other categories."""

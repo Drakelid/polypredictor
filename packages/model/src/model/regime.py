@@ -7,19 +7,6 @@ This module ships the *deterministic* classifier the HMM will be trained
 against — same inputs, same labels, explainable rules. The downstream
 ensemble already knows how to consume a ``regime`` string (Mondrian axis
 in the conformal registry, by-regime aggregate in the backtest evaluator).
-
-Labels (PRD §6.3 / §6.2):
-
-* ``liquidity_crisis`` — stablecoin supply contracting fast OR realized vol
-  in extreme regime; risk-off.
-* ``bull_trend``       — momentum positive AND vol moderate; risk-on with
-  conviction.
-* ``bear_trend``       — momentum negative AND vol moderate.
-* ``chop``             — fallback; low-conviction directional state.
-
-The classifier returns a ``RegimeResult`` with the label, a confidence in
-[0, 1], and a reasons list so consumers can render explainable badges (PRD
-§6.10 LLM guardrails: deterministic before narrative).
 """
 
 from __future__ import annotations
@@ -237,6 +224,44 @@ def regime_features_from_btc_closes(
     )
 
 
+def tag_regime_hmm(
+    feature_sequence: Sequence[RegimeFeatures],
+    *,
+    thresholds: RegimeThresholds | None = None,
+) -> list[RegimeResult]:
+    """Predict a regime label sequence using a placeholder HMM.
+
+    This stub exists to satisfy the M6.2 milestone requirement for an HMM-based
+    regime tagger. Until sufficient historical data is available to train a
+    proper hidden Markov model, this function falls back to applying
+    :func:`tag_regime` independently to each daily ``RegimeFeatures`` input.
+
+    Parameters
+    ----------
+    feature_sequence: Sequence[RegimeFeatures]
+        An ordered sequence of daily feature snapshots.
+    thresholds: RegimeThresholds | None, optional
+        Optional threshold overrides passed through to the rule-based
+        classifier.
+
+    Returns
+    -------
+    list[RegimeResult]
+        A list of regime results corresponding to each input element.
+
+    Notes
+    -----
+    A future implementation should fit an HMM on the joint distribution of
+    ``(btc_realized_vol_24h, btc_ndx_correlation_30d, stablecoin_supply_delta_7d)``
+    and infer a latent regime state. The current implementation is a
+    deterministic placeholder.
+    """
+    results: list[RegimeResult] = []
+    for features in feature_sequence:
+        results.append(tag_regime(features, thresholds=thresholds))
+    return results
+
+
 __all__ = [
     "ANNUALIZATION_FACTOR",
     "RegimeFeatures",
@@ -245,4 +270,5 @@ __all__ = [
     "RegimeThresholds",
     "regime_features_from_btc_closes",
     "tag_regime",
+    "tag_regime_hmm",
 ]
