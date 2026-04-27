@@ -69,6 +69,16 @@ BOOSTER_FEATURE_NAMES = (
     "macro_treasury_10y_30d_delta",
     "macro_yield_curve_2s10s",
     "macro_cpi_yoy_pct",
+    # M4.1 structured social features (PRD §6.3) — Reddit today, X once
+    # the M4.1 source decision is made. See
+    # services/api/src/api/social_features.py. Per-market scalars; legacy
+    # registries train no stumps for these names so existing serve paths
+    # are unaffected until the next retraining run picks them up.
+    "social_post_count_24h",
+    "social_reach_volume_24h",
+    "social_novelty_score_latest",
+    "social_sentiment_dispersion_24h",
+    "social_tone_shift_24h_vs_7d",
 )
 
 REGIME_FEATURE_NAMES = (
@@ -108,6 +118,14 @@ class EnsembleSample:
     macro_treasury_10y_30d_delta: float | None = None
     macro_yield_curve_2s10s: float | None = None
     macro_cpi_yoy_pct: float | None = None
+    # M4.1 structured social features (PRD §6.3). Sourced from Reddit today
+    # and X/Twitter once that M4.1 path is wired. See
+    # services/api/src/api/social_features.py.
+    social_post_count_24h: float | None = None
+    social_reach_volume_24h: float | None = None
+    social_novelty_score_latest: float | None = None
+    social_sentiment_dispersion_24h: float | None = None
+    social_tone_shift_24h_vs_7d: float | None = None
     outcome: int | None = None
     asked_at: float = 0.0
 

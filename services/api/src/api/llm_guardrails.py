@@ -46,22 +46,28 @@ def validate_llm_narration(text: str, context: LlmNarrationInput) -> str:
     """Return sanitized narration or raise ``ValueError``.
 
     The validator is intentionally conservative: if the LLM output contains any
-    numeric token or estimation language, reject it. Numeric values already exist
-    in deterministic API fields and should be rendered directly by the UI rather
-    than copied through an LLM.
+    numeric token or estimation language *outside* the supplied feature labels,
+    reject it. Feature labels themselves often contain numerics ("24h realized
+    vol", "5% book depth") so we strip allowed labels first, then check the
+    residual for numeric / estimation tokens. Numeric values that originate
+    elsewhere already exist in deterministic API fields and should be rendered
+    directly by the UI rather than copied through an LLM.
     """
     clean = " ".join(text.strip().split())
     if not clean:
         raise ValueError("LLM narration is empty")
-    if NUMERIC_CLAIM_RE.search(clean):
-        raise ValueError("LLM narration must not contain numeric claims")
 
     lowered = clean.lower()
     allowed_labels = {label.lower() for label in context.allowed_feature_labels}
-    estimation_scan_text = lowered
-    for label in allowed_labels:
-        estimation_scan_text = estimation_scan_text.replace(label, "")
-    if ESTIMATION_TERMS_RE.search(estimation_scan_text):
+    # Strip every allowed label from the residual we run the numeric and
+    # estimation regexes against, so a label like "24h realized vol" doesn't
+    # itself trip the numeric check on its leading "24".
+    residual = lowered
+    for label in sorted(allowed_labels, key=len, reverse=True):
+        residual = residual.replace(label, " ")
+    if NUMERIC_CLAIM_RE.search(residual):
+        raise ValueError("LLM narration must not contain numeric claims")
+    if ESTIMATION_TERMS_RE.search(residual):
         raise ValueError("LLM narration must not estimate probability, odds, price, or EV")
     mentioned_labels = {label for label in allowed_labels if label in lowered}
     if not mentioned_labels:

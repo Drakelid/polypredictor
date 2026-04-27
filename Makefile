@@ -1,4 +1,4 @@
-.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics retention-archive-plan drift-monitor signal-ablation resolution-risk-corpus dp-aggregates m7-audit ensemble-retrain
+.PHONY: help up down logs psql ch-sql redis-cli test lint typecheck fmt install ingest-discover ingest-clob ingest-features ingest-smart-money ingest-arb ingest-external ingest-microstructure-signals ingest-rss ingest-reddit ingest-x ingest-scheduled-events ingest-deribit-iv ingest-spot-validation ingest-macro-series ingest-perp-funding ingest-onchain-metrics retention-archive-plan drift-monitor signal-ablation resolution-risk-corpus dp-aggregates kol-credibility alert-outcome-audit m1-audit m2-audit m3-audit m4-audit m7-audit m8-audit ensemble-retrain source-failure-audit eol-monitor decision-time-monitor
 
 help:
 	@echo "Common targets:"
@@ -33,7 +33,14 @@ help:
 	@echo "  make signal-ablation # run monthly per-signal ablation + archive driver once"
 	@echo "  make resolution-risk-corpus # build the resolution-risk training corpus once"
 	@echo "  make dp-aggregates   # build the latest differentially private label aggregates once"
+	@echo "  make kol-credibility # compute rolling per-KOL credibility from KOL-tagged posts vs resolutions"
+	@echo "  make alert-outcome-audit # compute false-positive alert rate from signal_events vs market resolutions"
+	@echo "  make m1-audit        # run the M1 active-type coverage + threshold IV spot-check audit once"
+	@echo "  make m2-audit        # run the M2 typed-render + per-cell conformal coverage + journal v0 audit once"
+	@echo "  make m3-audit        # run the M3 smart-money ablation + arb replay + signal-feed density audit once"
+	@echo "  make m4-audit        # run the M4 social+event-time+resolution-risk exit audit once"
 	@echo "  make m7-audit        # run the M7 journal+tuning exit audit once"
+	@echo "  make m8-audit        # run the M8 per-cell Brier-skill + conformal-coverage exit audit once"
 	@echo "  make ensemble-retrain # PIT-replay resolved markets and refit per-type ensembles"
 
 install:
@@ -98,6 +105,10 @@ ingest-rss:
 ingest-reddit:
 	uv run python -c "import asyncio; from ingest.workers.reddit_ingest import run_once; count = asyncio.run(run_once()); print(f'wrote {count} external reddit events')"
 
+ingest-x:
+	uv run python -m ingest.workers.x_ingest
+
+
 ingest-scheduled-events:
 	uv run python -c "import asyncio; from ingest.workers.scheduled_events_ingest import run_once; count = asyncio.run(run_once()); print(f'wrote {count} scheduled catalyst events')"
 
@@ -131,8 +142,38 @@ resolution-risk-corpus:
 dp-aggregates:
 	uv run python -m api.dp_aggregates
 
+kol-credibility:
+	uv run python -m api.kol_credibility
+
+alert-outcome-audit:
+	uv run python -m api.alert_outcome_audit
+
+m1-audit:
+	uv run python -m api.m1_audit
+
+m2-audit:
+	uv run python -m api.m2_audit
+
+m3-audit:
+	uv run python -m api.m3_audit
+
+m4-audit:
+	uv run python -m api.m4_audit
+
 m7-audit:
 	uv run python -m api.m7_audit
 
+m8-audit:
+	uv run python -m api.m8_audit
+
 ensemble-retrain:
 	uv run python -m api.ensemble_retrain
+
+source-failure-audit:
+	uv run python -m api.source_failure_audit
+
+eol-monitor:
+	uv run python -m api.eol_monitor
+
+decision-time-monitor:
+	uv run python -m api.decision_time_monitor

@@ -27,7 +27,6 @@ from typing import Any
 
 from asyncpg import Pool
 
-
 _VALID_DECISIONS = frozenset({"accepted", "rejected"})
 
 
@@ -93,19 +92,18 @@ async def enqueue_for_review(
     if not cleaned_condition or not cleaned_question:
         raise ValueError("condition_id and question are required")
     issued_at = now or datetime.now(tz=UTC)
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            """
                 UPDATE market_classification_review
                    SET status = 'superseded'
                  WHERE condition_id = $1
                    AND status = 'pending'
                 """,
-                cleaned_condition,
-            )
-            new_id = await conn.fetchval(
-                """
+            cleaned_condition,
+        )
+        new_id = await conn.fetchval(
+            """
                 INSERT INTO market_classification_review (
                     condition_id,
                     question,
@@ -129,21 +127,21 @@ async def enqueue_for_review(
                 )
                 RETURNING id
                 """,
-                cleaned_condition,
-                cleaned_question,
-                description,
-                list(tags),
-                resolution_source,
-                end_date,
-                int(multi_outcome_sibling_count),
-                preliminary_market_type,
-                float(preliminary_confidence),
-                list(preliminary_reasons),
-                llm_market_type,
-                float(llm_confidence) if llm_confidence is not None else None,
-                llm_rationale,
-                issued_at,
-            )
+            cleaned_condition,
+            cleaned_question,
+            description,
+            list(tags),
+            resolution_source,
+            end_date,
+            int(multi_outcome_sibling_count),
+            preliminary_market_type,
+            float(preliminary_confidence),
+            list(preliminary_reasons),
+            llm_market_type,
+            float(llm_confidence) if llm_confidence is not None else None,
+            llm_rationale,
+            issued_at,
+        )
     return str(new_id)
 
 

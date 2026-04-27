@@ -19,6 +19,7 @@ import structlog
 
 from ..clickhouse import get_async_client
 from ..dlq import DeadLetterQueue
+from ..kol_loader import kol_categories_for_author, load_kol_index
 from ..settings import get_settings
 from ..writers import EXTERNAL_EVENTS_COLS, external_event_row, utcnow
 from .rss_ingest import (
@@ -144,6 +145,7 @@ async def build_external_event_rows(
     max_markets: int,
     max_related_markets: int,
     fetcher: Any | None = None,
+    kol_index: dict[str, list[str]] | None = None,
 ) -> list[tuple[object, ...]]:
     if not subreddits:
         return []
@@ -172,6 +174,15 @@ async def build_external_event_rows(
     for post in posts:
         if (post.source, post.source_id) in existing:
             continue
+        kol_categories = kol_categories_for_author(post.author, kol_index)
+        if kol_categories:
+            metadata = {
+                **post.metadata,
+                "kol_categories": kol_categories,
+                "is_kol": True,
+            }
+        else:
+            metadata = post.metadata
         rows.append(
             external_event_row(
                 event_kind=post.event_kind,
@@ -187,7 +198,7 @@ async def build_external_event_rows(
                 title=post.title,
                 body=post.body,
                 url=post.url,
-                metadata=post.metadata,
+                metadata=metadata,
                 event_time=post.event_time,
                 observed_at=observed_at,
             )
@@ -200,6 +211,7 @@ async def run_once() -> int:
     subreddits = parse_subreddits(settings.reddit_subreddits)
     if not subreddits:
         return 0
+    kol_index = load_kol_index(settings.reddit_kol_lists_file)
     ch = await get_async_client()
     try:
         observed_at = utcnow()
@@ -211,6 +223,7 @@ async def run_once() -> int:
             timeout_s=settings.reddit_timeout_s,
             max_markets=settings.reddit_max_markets,
             max_related_markets=settings.reddit_max_related_markets,
+            kol_index=kol_index,
         )
         if not rows:
             log.info("reddit_ingest.done", events=0)

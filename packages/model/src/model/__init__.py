@@ -126,6 +126,7 @@ from .regulatory_watch import filter_regulatory_news
 from .resolution_metrics import precision_recall
 from .resolution_risk import ResolutionRiskResult, score_resolution_risk
 from .security_utils import needs_rotation
+from .sentiment_lexicon import score_text, score_texts
 from .sibling_arb import (
     ArbViolation,
     MultiOutcomeGroup,
@@ -155,8 +156,6 @@ __all__ = [
     "BOOSTER_FEATURE_NAMES",
     "HUMAN_REVIEW_QUEUE",
     "LINEAR_FEATURE_NAMES",
-    "LlmCallable",
-    "LlmSuggestion",
     "ROLLING_WINDOWS_DEFAULT",
     "TTR_BUCKETS_DEFAULT",
     "ArbViolation",
@@ -188,6 +187,8 @@ __all__ = [
     "HeadlineType",
     "IsotonicCalibrator",
     "JournalCall",
+    "LlmCallable",
+    "LlmSuggestion",
     "MarketFeatures",
     "MarketType",
     "MultiOutcomeGroup",
@@ -275,6 +276,8 @@ __all__ = [
     "response_shape_hash",
     "rolling_window_reports",
     "score_resolution_risk",
+    "score_text",
+    "score_texts",
     "select_actionable_events",
     "sentiment_dispersion",
     "should_auto_disable",

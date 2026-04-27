@@ -1,43 +1,48 @@
-# Decision: Pricing Model for v1 Launch
+# Decision: Pricing Model
 
-*Date: 2026‑04‑25*
+*Date: 2026‑04‑27 · Decided: 2026‑04‑27*
 
-## Context
+## Decision
 
-The product team needs to finalize a pricing model before public launch. Options include a flat subscription, usage‑based billing, or a freemium model with paid tiers. The target price range discussed in the PRD is $30–$80 per month.
+**Single flat tier at $49/month** (annual option: $39/month billed yearly).
 
-## Options
+This is within the $30–$80 range identified in PRD §11.1 and balances
+accessibility with the cost of live data sources (~$130/month: X Basic API
+$100 + Glassnode free + CME FedWatch $30 marginal) plus infrastructure
+overhead.
 
-### Flat subscription (single tier)
+## Rationale
 
-**Pros:**
-* Simple to explain and implement.
-* Predictable revenue for the company and cost for users.
-* Encourages regular use without fear of incremental charges.
+1. **Simplicity** — A single tier eliminates plan confusion. Beta users can
+   convert with zero upsell friction.
 
-**Cons:**
-* Might not scale well for heavy or light users; heavy users get a bargain, light users may perceive it as overpriced.
+2. **Sustainable at low volume** — At 50 paying subscribers, monthly revenue
+   ($2,450) covers data + Render hosting (~$200) with margin for growth.
 
-### Usage‑based pricing
+3. **Competitive positioning** — Comparable crypto signal tools (Coinalyze
+   Pro, Token Metrics) charge $39–$99/month. $49 sits comfortably in the
+   midrange with a stronger model transparency story.
 
-**Pros:**
-* Aligns cost with value consumed; heavy users pay more, light users pay less.
-* Can encourage experimentation without committing to a monthly fee.
+4. **Annual incentive** — The 20% annual discount reduces churn and front-
+   loads cash for data contract commitments.
 
-**Cons:**
-* Harder to predict costs; users may be wary of variable bills.
-* More complex metering and billing infrastructure.
+## What is included
 
-### Freemium model
+* Full model probability + conformal bands for all tracked markets
+* Signal feed (whale flow, arb, large prints, book shocks)
+* Journal + calibration tracking
+* Model tuning (Conservative / Balanced / Aggressive + custom)
+* Polymarket wallet sync (read-only) & auto-fill journal
 
-**Pros:**
-* Lowers barrier to entry by offering a free tier with limited features or quota.
-* Allows users to try before buying; conversion can be driven by premium features such as increased limits, advanced analytics, or faster updates.
+## What is not included in v1
 
-**Cons:**
-* Needs careful segmentation of free vs paid features to avoid cannibalizing the paid tier.
-* Free tier users consume resources without revenue.
+* White-label / API access — v2 roadmap
+* Team seats — v2 roadmap
 
-## Preliminary recommendation
+## Payment implementation
 
-Start with a flat subscription in the mid‑range of the proposed $30–$80/month, as it provides simplicity and aligns with comparable analytics products. Consider usage‑based add‑ons (e.g. additional data export calls or API access) for power users. Revisit pricing after beta feedback.
+* Stripe Checkout — operator provides `STRIPE_SECRET_KEY` + `STRIPE_PRICE_ID`
+* Fallback mock session when Stripe keys are absent (dev / staging)
+* Subscription state tracked in `billing_subscriptions` Postgres table
+* Webhook endpoint (`/v1/billing/webhook`) updates subscription status on
+  `customer.subscription.updated` / `invoice.payment_succeeded` events

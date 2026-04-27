@@ -37,6 +37,27 @@ class Settings(BaseSettings):
     polymarket_data_base: str = "https://data-api.polymarket.com"
     polymarket_wss_base: str = "wss://ws-subscriptions-clob.polymarket.com"
     user_secret_encryption_key_b64: str | None = None
+    # X/Twitter Basic API (M4.1 decision: paid API chosen).
+    x_bearer_token: str | None = None
+    x_filtered_stream_rules_file: str | None = None
+    # Stripe billing (v1 launch).
+    stripe_secret_key: str | None = None
+    stripe_price_id: str | None = None
+    stripe_webhook_secret: str | None = None
+    billing_monthly_price_usd: float = 49.0
+    billing_success_url: str = "http://localhost:3000/billing/success"
+    billing_cancel_url: str = "http://localhost:3000/pricing"
+    # Waitlist.
+    waitlist_limit: int = 100
+    # P0/P1 source SLA config (M5 audit).
+    p0_p1_sources_file: str | None = None
+    source_failure_audit_window_hours: int = 24
+    source_failure_audit_threshold: float = 0.01
+    # EOL monitor (M8.3).
+    eol_monitor_lookback_days: int = 30
+    # Time-to-decision (M8.5).
+    decision_time_window_hours: int = 48
+    decision_time_target_minutes: float = 5.0
     deribit_base: str = "https://www.deribit.com/api/v2"
     cme_fedwatch_base: str = "https://markets.api.cmegroup.com/fedwatch/v1"
     cme_oauth_token_url: str = "https://auth.cmegroup.com/as/token.oauth2"
@@ -114,6 +135,8 @@ class Settings(BaseSettings):
     cpi_consensus_stddev: float | None = None
     nfp_consensus_point: float | None = None
     nfp_consensus_stddev: float | None = None
+    # Continuous market distribution output (Open Q decision).
+    distribution_n_points: int = 25
 
     @property
     def postgres_dsn(self) -> str:

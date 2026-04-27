@@ -37,7 +37,7 @@ services:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -54,6 +54,92 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-polypredictor}
+      POSTGRES_USER: ${POSTGRES_USER:-polypredictor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polypredictor_dev}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-polypredictor}
+      REDIS_URL: redis://redis:6379/0
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-mock-price-id}
+      BILLING_MONTHLY_PRICE_USD: ${BILLING_MONTHLY_PRICE_USD:-49}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      API_BASE: http://api:8000
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    depends_on:
+      - api
+
+  ingest-gamma:
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
+    command: ["python", "-m", "ingest.workers.gamma_discovery"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-polypredictor}
+      POSTGRES_USER: ${POSTGRES_USER:-polypredictor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polypredictor_dev}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-polypredictor}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  ingest-x:
+    build:
+      context: .
+      dockerfile: services/ingest/Dockerfile
+    command: ["python", "-m", "ingest.workers.x_ingest"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-polypredictor}
+      POSTGRES_USER: ${POSTGRES_USER:-polypredictor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polypredictor_dev}
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-polypredictor}
+      REDIS_URL: redis://redis:6379/0
+      X_BEARER_TOKEN: ${X_BEARER_TOKEN:-}
+      X_FILTERED_STREAM_RULES_FILE: ${X_FILTERED_STREAM_RULES_FILE:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   pg_data:

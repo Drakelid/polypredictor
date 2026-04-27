@@ -17,6 +17,7 @@ from __future__ import annotations
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from clickhouse_connect.driver.asyncclient import AsyncClient
 from model import (
@@ -83,6 +84,11 @@ from .smart_money import (
     SmartMoneyPerMarket,
     smart_money_asof,
     smart_money_batch_asof,
+)
+from .social_features import (
+    SocialFeatures,
+    social_features_batch_asof,
+    social_features_for_market,
 )
 from .tuning import TuningAdjustmentContext, TuningProfile, apply_tuning_adjustment
 
@@ -730,6 +736,7 @@ def _ensemble_sample_for_row(
     regime_label: str | None = None,
     onchain: OnchainFeatureContext | None = None,
     macro: MacroFeatureContext | None = None,
+    social: SocialFeatures | None = None,
     concentration_threshold: float,
     asked_at: datetime,
 ) -> EnsembleSample | None:
@@ -800,6 +807,21 @@ def _ensemble_sample_for_row(
             macro.yield_curve_2s10s if macro is not None else None
         ),
         macro_cpi_yoy_pct=(macro.cpi_yoy_pct if macro is not None else None),
+        social_post_count_24h=(
+            float(social.post_count_24h) if social is not None else None
+        ),
+        social_reach_volume_24h=(
+            float(social.reach_volume_24h) if social is not None else None
+        ),
+        social_novelty_score_latest=(
+            float(social.novelty_score_latest) if social is not None else None
+        ),
+        social_sentiment_dispersion_24h=(
+            float(social.sentiment_dispersion_24h) if social is not None else None
+        ),
+        social_tone_shift_24h_vs_7d=(
+            float(social.tone_shift_24h_vs_7d) if social is not None else None
+        ),
         asked_at=asked_at.timestamp(),
     )
 
@@ -819,6 +841,7 @@ def _apply_ensemble_refinement(
     regime_label: str | None = None,
     onchain: OnchainFeatureContext | None = None,
     macro: MacroFeatureContext | None = None,
+    social: SocialFeatures | None = None,
     disable_status: ModelDisableStatus | None = None,
     concentration_threshold: float,
     adversarial_flow_blend_floor: float,
@@ -859,6 +882,7 @@ def _apply_ensemble_refinement(
         regime_label=regime_label,
         onchain=onchain,
         macro=macro,
+        social=social,
         concentration_threshold=concentration_threshold,
         asked_at=asked_at,
     )
@@ -986,6 +1010,15 @@ async def list_markets(
         market_types=distinct_market_types,
         asked_at=asked_at,
     )
+    # M4.1 social features (PRD §6.3) — single batched query over the
+    # full list. Fanning out one query per market would 200x the read
+    # amplification on external_events; the batched helper does one
+    # `hasAny` query and buckets posts per condition_id in Python.
+    social_features_by_cid = await social_features_batch_asof(
+        ch,
+        condition_ids=[str(snap["condition_id"]) for snap in snaps],
+        asked_at=asked_at,
+    )
 
     discrete = _discrete_config_from_settings(settings)
     registry = load_ensemble_registry(settings.ensemble_registry_file)
@@ -1057,6 +1090,7 @@ async def list_markets(
                 regime_label=regime_row.label if regime_row is not None else None,
                 onchain=onchain_context,
                 macro=macro_context,
+                social=social_features_by_cid.get(cid),
                 disable_status=disable_status_by_type.get(
                     classification.market_type.value
                 ),
@@ -1158,6 +1192,7 @@ class MarketModelDetail:
     classifier: str
     mid: float | None
     model_prob: float | None
+    distribution_samples: list[tuple[float, float]] | None
     model_source: str
     refinement_source: str | None
     baseline_source: str
@@ -1336,6 +1371,7 @@ def _feature_attributions_for_sample(
     registry: EnsembleRegistry | None,
     model_source: str,
     sample: EnsembleSample | None,
+    narrator: Any | None = None,
 ) -> tuple[list[str], list[dict[str, object]]]:
     if registry is None or sample is None or model_source != "ensemble":
         return [], []
@@ -1363,10 +1399,23 @@ def _feature_attributions_for_sample(
         }
         for contribution in ranked
     ]
-    return [
-        _driver_summary(contribution)
-        for contribution in ranked[:3]
-    ], attributions
+    top_three = ranked[:3]
+    if narrator is None:
+        summaries = [_driver_summary(contribution) for contribution in top_three]
+    else:
+        # Operator wired an LLM narrator. Pass label + sign only — guardrails
+        # in narrate_top_drivers reject any output that contains a number or
+        # estimation language and fall back per-line.
+        from .llm_narrator import narrate_top_drivers
+
+        summaries = narrate_top_drivers(
+            drivers=[
+                (_attribution_label(contribution.feature_name), contribution.score_contribution)
+                for contribution in top_three
+            ],
+            narrator=narrator,
+        )
+    return summaries, attributions
 
 
 async def model_for_market(
@@ -1417,6 +1466,15 @@ async def model_for_market(
     regime_row = await regime_label_asof(ch, asked_at)
     onchain_context = await load_onchain_feature_context(ch, asked_at)
     macro_context = await load_macro_feature_context(ch, asked_at)
+    # M4.1 structured social features. One per-market query against
+    # external_events.event_kind='social' over the trailing 7d window.
+    # Today's social rows are Reddit-only; X joins once the M4.1 source
+    # decision is made. Wired into the ensemble booster path.
+    social_context = await social_features_for_market(
+        ch,
+        condition_id=condition_id,
+        asked_at=asked_at,
+    )
     disable_status = (
         await model_disable_status_asof(
             ch,
@@ -1517,6 +1575,7 @@ async def model_for_market(
         regime_label=regime_row.label if regime_row is not None else None,
         onchain=onchain_context,
         macro=macro_context,
+        social=social_context,
         disable_status=disable_status,
         concentration_threshold=settings.holder_concentration_down_weight_threshold,
         adversarial_flow_blend_floor=settings.adversarial_flow_blend_floor,
@@ -1549,6 +1608,7 @@ async def model_for_market(
         regime_label=regime_row.label if regime_row is not None else None,
         onchain=onchain_context,
         macro=macro_context,
+        social=social_context,
         concentration_threshold=settings.holder_concentration_down_weight_threshold,
         asked_at=asked_at,
     )
@@ -1595,6 +1655,27 @@ async def model_for_market(
         model_reasons.append("thin_book: top-of-book depth below threshold")
     if edge_bps is None:
         model_reasons.append("edge suppressed: high resolution risk")
+        
+    distribution_samples = None
+    if classification.market_type in (MarketType.RANGE, MarketType.MULTI_OUTCOME):
+        from . import distribution_utils as dist_utils
+        if classification.market_type is MarketType.RANGE and band_lo is not None and band_hi is not None:
+            # Gaussian approx from bands (assuming ~90% coverage width = 3.29 sigma)
+            import math
+            import random
+            sigma = (band_hi - band_lo) / 3.29
+            mu = (band_hi + band_lo) / 2.0
+            if sigma > 0:
+                samples = [random.gauss(mu, sigma) for _ in range(1000)]
+                distribution_samples = dist_utils.percentile_grid(samples, n_points=settings.distribution_n_points)
+        elif classification.market_type is MarketType.MULTI_OUTCOME:
+            if pipeline_result.baseline.probability is not None:
+                # Interpolate softmax output probabilities (since they constitute a true CDF in sorted outcome order)
+                multi_context = multi_outcome_contexts.get(condition_id)
+                if multi_context and multi_context.raw:
+                    samples = sorted(float(v) for v in multi_context.raw)
+                    distribution_samples = dist_utils.percentile_grid(samples, n_points=settings.distribution_n_points)
+
     return MarketModelDetail(
         condition_id=condition_id,
         question=str(snap["question"]),
@@ -1604,6 +1685,7 @@ async def model_for_market(
         classifier=classification.classifier,
         mid=yes_mid,
         model_prob=model_prob,
+        distribution_samples=distribution_samples,
         model_source=model_source,
         refinement_source=refinement_source,
         baseline_source=str(pipeline_result.displayed_source.value),

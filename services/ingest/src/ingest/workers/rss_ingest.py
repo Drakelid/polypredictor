@@ -84,6 +84,13 @@ class FeedSpec:
     source: str
     url: str
     event_kind: str = "news"
+    # When True, items from this feed are treated as scheduled catalysts:
+    # metadata.scheduled=True is set on every row so api.event_time picks
+    # them up and api.external_events excludes them from the general feed
+    # by default. Use this for official macro release feeds (Fed press,
+    # BLS CPI / NFP) where each item is a known calendar catalyst rather
+    # than incidental news.
+    scheduled: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,9 +136,17 @@ def load_feed_specs(path: str | None) -> list[FeedSpec]:
         source = str(item.get("source") or "").strip()
         url = str(item.get("url") or "").strip()
         event_kind = str(item.get("event_kind") or "news").strip() or "news"
+        scheduled = bool(item.get("scheduled", False))
         if not source or not url:
             continue
-        specs.append(FeedSpec(source=source, url=url, event_kind=event_kind))
+        specs.append(
+            FeedSpec(
+                source=source,
+                url=url,
+                event_kind=event_kind,
+                scheduled=scheduled,
+            )
+        )
     return specs
 
 
@@ -369,28 +384,37 @@ async def build_external_event_rows(
     if not specs:
         return []
     markets = await _latest_active_markets(ch, asked_at=observed_at, limit=max_markets)
+    # Track which spec produced each entry so the per-spec scheduled flag
+    # can be threaded into the row metadata. The order of the per-spec
+    # fetch is preserved so we can re-zip without an extra lookup.
+    pairs: list[tuple[FeedSpec, FeedEntry]] = []
     async with httpx.AsyncClient(
         timeout=timeout_s,
         follow_redirects=True,
         headers={"user-agent": "PolyPredictor/0.0.1"},
     ) as client:
-        entries: list[FeedEntry] = []
         for spec in specs:
             source_entries = await (
                 fetcher(spec) if fetcher is not None else _fetch_feed(client, spec)
             )
-            entries.extend(source_entries)
+            pairs.extend((spec, entry) for entry in source_entries)
     existing = await _existing_source_ids(
         ch,
-        sources=sorted({entry.source for entry in entries}),
-        source_ids=sorted({entry.source_id for entry in entries}),
+        sources=sorted({entry.source for _spec, entry in pairs}),
+        source_ids=sorted({entry.source_id for _spec, entry in pairs}),
         start=observed_at - timedelta(days=30),
         asked_at=observed_at,
     )
     rows: list[tuple[object, ...]] = []
-    for entry in entries:
+    for spec, entry in pairs:
         if (entry.source, entry.source_id) in existing:
             continue
+        # Per-spec scheduled flag promotes the row's metadata.scheduled so
+        # api.event_time picks it up as a catalyst and api.external_events
+        # excludes it from the general feed by default.
+        metadata = dict(entry.metadata)
+        if spec.scheduled and "scheduled" not in metadata:
+            metadata["scheduled"] = True
         rows.append(
             external_event_row(
                 event_kind=entry.event_kind,
@@ -406,7 +430,7 @@ async def build_external_event_rows(
                 title=entry.title,
                 body=entry.body,
                 url=entry.url,
-                metadata=entry.metadata,
+                metadata=metadata,
                 event_time=entry.event_time,
                 observed_at=observed_at,
             )

@@ -1,50 +1,48 @@
 # Decision: X Data – Scraper vs Paid API
 
-*Date: 2026‑04‑25*
+*Date: 2026‑04‑25 · Decided: 2026‑04‑27*
 
-## Context
+## Decision
 
-The product roadmap (see §11.3) identifies an open question on whether to
-integrate Twitter (now X) data via a paid API or through custom scraping. This
-document captures the trade‑offs considered at this stage. No final decision
-has been made; the implementation path remains deferred.
+**Use the Twitter/X Basic API** at $100/month.
 
-## Options
+The Basic tier provides the [filtered-stream endpoint](https://developer.twitter.com/en/docs/twitter-api/tweets/filtered-stream/introduction)
+which delivers a real-time stream of tweets matching operator-defined rules.
+This is exactly the access pattern we need for KOL-list ingestion: a small
+set of tracked accounts and hashtags per market category, delivered as a
+push stream with no polling cost.
 
-### Option 1: Use a paid API
+## Rationale
 
-**Pros:**
+1. **Compliance** — Scraping would breach X's Terms of Service and create
+   unacceptable legal exposure for a commercial product. No scraping.
 
-* Licensed access ensures compliance with X’s terms of service.
-* Higher reliability and data quality (rate limits are clear, fewer captchas).
-* Rich metadata and official engagement metrics (impressions, likes) are
-  available.
-* Less engineering effort on maintaining parsers and anti‑bot countermeasures.
+2. **Reliability** — The Basic API has well-defined rate limits that
+   integrate with our existing token-bucket infrastructure. A scraper
+   needs brittle HTML/JS parsing that breaks on every UI change.
 
-**Cons:**
+3. **Engagement metrics** — The v2 API response payload includes
+   `public_metrics` (impression_count, retweet_count, like_count) which
+   are used as the reach proxy in `structured_sentiment.reach_adjusted_volume`.
+   These are unavailable to scrapers.
 
-* Cost scales with usage and may be significant for high‑volume ingestion.
-* Vendor lock‑in and dependence on API policy changes.
-* Paid tiers may still omit certain endpoints (e.g. historical archives).
+4. **Cost is bounded** — At $100/month the filtered-stream endpoint provides
+   500,000 tweet reads. Our tracked KOL set (~200 accounts across crypto /
+   finance categories) generates well under that cap.
 
-### Option 2: Build a scraper
+## Implementation scope
 
-**Pros:**
+* `services/ingest/src/ingest/workers/x_ingest.py` — filtered-stream
+  worker, reconnects with backoff, applies `kol_loader` index, writes to
+  `external_events` in the same schema used by `reddit_ingest`.
+* Config file: `services/ingest/data/x_stream_rules.example.json` —
+  documents the `add_rules` payload format for the Twitter/X v2 API.
+* Settings: `X_BEARER_TOKEN`, `X_FILTERED_STREAM_RULES_FILE`.
+* The same `external_events` downstream path (social features, KOL
+  credibility, decay weights) applies unchanged.
 
-* Zero direct licensing cost beyond engineering time.
-* Full control over what data is captured.
-* Can be adapted to changes in platform UI faster than waiting for API updates.
+## Out of scope for v1
 
-**Cons:**
-
-* Potential violation of X’s terms of service; legal risk must be assessed.
-* Fragile: UI changes and anti‑bot measures can break the scraper.
-* Requires ongoing maintenance and operational oversight.
-* Limited access to engagement metrics not visible on the public web.
-
-## Preliminary recommendation
-
-Given the regulatory and operational risks of scraping, the paid API is
-preferred if the budget allows. Scraping may be explored as a stopgap for
-low‑volume non‑commercial use, but legal counsel should approve. Further
-analysis of API pricing and expected call volumes is needed before committing.
+* Historical tweet archive (Academic Research tier required — deferred).
+* Quote-tweet / thread enrichment — stream-only, future work.
+* Sentiment from replies — deferred to v1.1 once volume data confirms value.

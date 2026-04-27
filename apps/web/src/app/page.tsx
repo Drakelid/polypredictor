@@ -13,6 +13,7 @@ import {
   fetchJournalCalls,
   fetchJournalSummary,
   fetchMarkets,
+  fetchPaperTradingStatus,
   fetchPolymarketAddress,
   fetchPolymarketClobCredentials,
   fetchSignals,
@@ -32,6 +33,8 @@ import {
   type PushPreferences,
   type SignalEvent,
   type TuningProfile,
+  type PaperTradingStatus,
+  updatePaperTrading,
   updatePolymarketAddress,
   updatePolymarketClobCredentials,
   updatePrivacyPreferences,
@@ -156,6 +159,7 @@ export default function DashboardPage() {
   const [backtestRegime, setBacktestRegime] = useState("all");
   const [prefsForm, setPrefsForm] = useState<PushPreferences | null>(null);
   const [privacyForm, setPrivacyForm] = useState<PrivacyPreferences | null>(null);
+  const [paperTradingForm, setPaperTradingForm] = useState<PaperTradingStatus | null>(null);
   const [tuningForm, setTuningForm] = useState<TuningProfile | null>(null);
   const [polymarketAddressInput, setPolymarketAddressInput] = useState("");
   const [clobForm, setClobForm] = useState<{
@@ -191,6 +195,10 @@ export default function DashboardPage() {
   const privacyPrefs = useQuery({
     queryKey: ["privacy-preferences"],
     queryFn: fetchPrivacyPreferences,
+  });
+  const paperTradingStatus = useQuery({
+    queryKey: ["paper-trading"],
+    queryFn: fetchPaperTradingStatus,
   });
   const polymarketAddress = useQuery({
     queryKey: ["polymarket-address"],
@@ -251,6 +259,13 @@ export default function DashboardPage() {
     onSuccess: async (next) => {
       setPrivacyForm(next);
       await queryClient.invalidateQueries({ queryKey: ["privacy-preferences"] });
+    },
+  });
+  const savePaperTrading = useMutation({
+    mutationFn: (enabled: boolean) => updatePaperTrading(enabled),
+    onSuccess: async (next) => {
+      setPaperTradingForm(next);
+      await queryClient.invalidateQueries({ queryKey: ["paper-trading"] });
     },
   });
   const saveTuningProfile = useMutation({
@@ -319,6 +334,12 @@ export default function DashboardPage() {
       setPrivacyForm(privacyPrefs.data);
     }
   }, [privacyPrefs.data]);
+
+  useEffect(() => {
+    if (paperTradingStatus.data) {
+      setPaperTradingForm(paperTradingStatus.data);
+    }
+  }, [paperTradingStatus.data]);
 
   useEffect(() => {
     if (tuningProfile.data) {
@@ -617,7 +638,7 @@ export default function DashboardPage() {
         </section>
       )}
 
-      {prefsForm && privacyForm && (
+      {prefsForm && privacyForm && paperTradingForm && (
         <section className="mb-6">
           {tuningForm && (
             <div className="mb-4 rounded border border-gray-800 bg-gray-900/40 p-4">
@@ -983,6 +1004,53 @@ export default function DashboardPage() {
             {savePrivacyPrefs.error && (
               <div className="mt-2 text-sm text-edge-bearish">
                 {(savePrivacyPrefs.error as Error).message}
+              </div>
+            )}
+          </div>
+
+          <div className="mb-4 rounded border border-gray-800 bg-gray-900/40 p-4">
+            <div className="mb-3 flex items-center justify-between text-xs uppercase tracking-wide text-gray-500">
+              <span>Paper Trading</span>
+              <span>
+                {paperTradingForm.updated_at
+                  ? `saved ${new Date(paperTradingForm.updated_at).toLocaleString()}`
+                  : "default off"}
+              </span>
+            </div>
+            <label className="flex items-start gap-3 text-sm text-gray-300">
+                <input
+                  type="checkbox"
+                  checked={paperTradingForm.enabled}
+                onChange={(event) =>
+                  setPaperTradingForm({
+                    ...paperTradingForm,
+                    enabled: event.target.checked,
+                  })
+                }
+              />
+              <span>
+                Enable paper trading mode.
+                <span className="mt-1 block text-xs text-gray-500">
+                  When enabled, all new journal calls are tagged as paper trades. They do not trigger real wallet actions and are excluded from live PnL calculations.
+                </span>
+              </span>
+            </label>
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <div className="text-xs text-gray-500">
+                Paper trades track model edge exactly like live trades but use simulated entries.
+              </div>
+              <button
+                type="button"
+                className="rounded border border-sky-700/60 bg-sky-900/30 px-4 py-2 text-sm text-sky-200 disabled:opacity-50"
+                disabled={savePaperTrading.isPending}
+                onClick={() => savePaperTrading.mutate(paperTradingForm.enabled)}
+              >
+                {savePaperTrading.isPending ? "Saving..." : "Save paper trading"}
+              </button>
+            </div>
+            {savePaperTrading.error && (
+              <div className="mt-2 text-sm text-edge-bearish">
+                {(savePaperTrading.error as Error).message}
               </div>
             )}
           </div>

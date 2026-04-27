@@ -94,6 +94,7 @@ export type MarketModel = {
   mid: number | null;
   model_prob: number | null;
   model_source: string;
+  distribution_samples?: [number, number][] | null;
   refinement_source: string | null;
   baseline_source: string;
   tuning_profile: string | null;
@@ -750,3 +751,149 @@ export async function createJournalCall(payload: {
 }> {
   return postJson("/v1/journal/calls", payload);
 }
+
+// ---------------------------------------------------------------------------
+// Paper trading toggle
+// ---------------------------------------------------------------------------
+
+export type PaperTradingStatus = {
+  enabled: boolean;
+  updated_at: string | null;
+};
+
+export async function fetchPaperTradingStatus(): Promise<PaperTradingStatus> {
+  try {
+    return await getJson<PaperTradingStatus>("/v1/paper-trading");
+  } catch {
+    return { enabled: false, updated_at: null };
+  }
+}
+
+export async function updatePaperTrading(
+  enabled: boolean,
+): Promise<PaperTradingStatus> {
+  return putJson<PaperTradingStatus>("/v1/paper-trading", { enabled });
+}
+
+// ---------------------------------------------------------------------------
+// Waitlist
+// ---------------------------------------------------------------------------
+
+export type WaitlistSignupResult = {
+  id: string;
+  email: string;
+  name: string | null;
+  created_at: string;
+};
+
+export async function submitWaitlistSignup(payload: {
+  email: string;
+  name?: string | null;
+  use_case?: string | null;
+  source?: string;
+}): Promise<WaitlistSignupResult> {
+  return postJson<WaitlistSignupResult>("/v1/waitlist", payload);
+}
+
+// ---------------------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------------------
+
+export type CheckoutSession = {
+  session_id: string;
+  url: string;
+  is_mock: boolean;
+};
+
+export type BillingSubscriptionStatus = {
+  email: string;
+  status: string;
+  plan: string | null;
+};
+
+export async function createCheckoutSession(payload: {
+  email: string;
+  success_url?: string;
+  cancel_url?: string;
+}): Promise<CheckoutSession> {
+  return postJson<CheckoutSession>("/v1/billing/checkout", payload);
+}
+
+export async function fetchBillingStatus(
+  email: string,
+): Promise<BillingSubscriptionStatus> {
+  return getJson<BillingSubscriptionStatus>(
+    `/v1/billing/status?email=${encodeURIComponent(email)}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// EOL monitor (M8.3)
+// ---------------------------------------------------------------------------
+
+export type EolMonitorReport = {
+  as_of: string;
+  lookback_days: number;
+  ramp_up: {
+    markets_checked: number;
+    markets_with_high_certainty: number;
+    markets_with_low_certainty: number;
+    high_certainty_rate: number;
+    sample_market_ids: string[];
+  };
+  phantom_edge: {
+    alerts_in_final_hour: number;
+    alerts_suppressed: number;
+    alerts_not_suppressed: number;
+    suppression_rate: number;
+    sample_unsuppressed_ids: string[];
+  };
+  last_hour_fp: {
+    alerts_classified: number;
+    true_positives: number;
+    false_positives: number;
+    skipped_unresolved: number;
+    fp_rate: number | null;
+    meets_target: boolean;
+  };
+};
+
+export async function fetchEolMonitor(
+  lookbackDays = 30,
+): Promise<EolMonitorReport | null> {
+  try {
+    return await getJson<EolMonitorReport>(
+      `/v1/eol-monitor?lookback_days=${lookbackDays}`,
+    );
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Decision-time metrics (M8.5)
+// ---------------------------------------------------------------------------
+
+export type DecisionTimeReport = {
+  as_of: string;
+  window_hours: number;
+  window_label: string;
+  sample_count: number;
+  median_minutes: number | null;
+  p90_minutes: number | null;
+  meets_target: boolean;
+  target_minutes: number;
+};
+
+export async function fetchDecisionTimeMetrics(
+  windowHours = 48,
+): Promise<DecisionTimeReport | null> {
+  try {
+    return await getJson<DecisionTimeReport>(
+      `/v1/decision-time-metrics?window_hours=${windowHours}`,
+    );
+  } catch {
+    return null;
+  }
+}
+

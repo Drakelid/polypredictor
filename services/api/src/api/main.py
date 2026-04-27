@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 from . import asof as asof_q
 from . import auth as auth_q
 from . import backtest_report as backtest_report_q
-from . import classification_review as classification_review_q
 from . import beta_onboarding as beta_onboarding_q
+from . import classification_review as classification_review_q
 from . import clob_credentials as clob_credentials_q
 from . import concentration as concentration_q
 from . import cost_watch as cost_watch_q
@@ -39,9 +39,16 @@ from . import regulatory_watch as regulatory_watch_q
 from . import security_audit as security_audit_q
 from . import signals as signals_q
 from . import smart_money as smart_money_q
+from . import social_features as social_features_q
 from . import source_health as source_health_q
 from . import system_status as system_status_q
 from . import tuning as tuning_q
+from . import billing as billing_q
+from . import decision_time_monitor as dtm_q
+from . import eol_monitor as eol_q
+from . import paper_trading as paper_trading_q
+from . import source_failure_audit as sfa_q
+from . import waitlist as waitlist_q
 from .clickhouse import get_async_client
 from .postgres import get_async_pool
 from .settings import get_settings
@@ -666,6 +673,7 @@ async def market_model(
         "classifier": detail.classifier,
         "mid": detail.mid,
         "model_prob": detail.model_prob,
+        "distribution_samples": detail.distribution_samples,
         "model_source": detail.model_source,
         "refinement_source": detail.refinement_source,
         "baseline_source": detail.baseline_source,
@@ -1338,6 +1346,37 @@ async def market_concentration(
     }
 
 
+@app.get("/v1/markets/{condition_id}/social-features")
+async def market_social_features(
+    condition_id: str,
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """Per-market structured social features (M4.1 §6.3).
+
+    Aggregates social rows already in ``external_events`` (Reddit /
+    upcoming X) into deterministic structured features: post count,
+    reach volume, novelty of latest post, sentiment dispersion, tone
+    shift vs. trailing 7d baseline. No LLM is involved — sentiment is
+    derived from the deterministic lexicon in ``model.score_text``.
+    """
+    asked_at = datetime.now(tz=UTC)
+    features = await social_features_q.social_features_for_market(
+        ch,
+        condition_id=condition_id,
+        asked_at=asked_at,
+    )
+    return {
+        "asked_at": features.asked_at.isoformat(),
+        "condition_id": features.condition_id,
+        "post_count_24h": features.post_count_24h,
+        "post_count_7d": features.post_count_7d,
+        "reach_volume_24h": features.reach_volume_24h,
+        "novelty_score_latest": features.novelty_score_latest,
+        "sentiment_dispersion_24h": features.sentiment_dispersion_24h,
+        "tone_shift_24h_vs_7d": features.tone_shift_24h_vs_7d,
+    }
+
+
 @app.get("/v1/markets/{condition_id}/smart-money")
 async def market_smart_money(
     condition_id: str,
@@ -1683,3 +1722,254 @@ async def admin_disable_model_type(
         "reason": transition.reason,
         "observed_at": transition.observed_at.isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Waitlist (v1 launch) — unauthenticated POST, admin GET
+# ---------------------------------------------------------------------------
+
+
+class WaitlistSignupRequest(BaseModel):
+    email: str
+    name: str | None = None
+    use_case: str | None = None
+    source: str = "web"
+
+
+@app.post("/v1/waitlist")
+async def waitlist_signup(
+    payload: WaitlistSignupRequest,
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Self-service public waitlist sign-up. Idempotent on email."""
+    try:
+        entry = await waitlist_q.create_waitlist_entry(
+            pool,
+            waitlist_q.WaitlistInput(
+                email=payload.email,
+                name=payload.name,
+                use_case=payload.use_case,
+                source=payload.source,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "id": str(entry.id),
+        "email": entry.email,
+        "name": entry.name,
+        "created_at": entry.created_at.isoformat(),
+    }
+
+
+@app.get("/v1/waitlist")
+async def waitlist_admin(
+    limit: int = Query(100, ge=1, le=500),
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Admin summary of the public waitlist."""
+    settings = get_settings()
+    summary = await waitlist_q.get_waitlist_summary(pool, limit=min(limit, settings.waitlist_limit))
+    return {
+        "total_signups": summary.total_signups,
+        "converted": summary.converted,
+        "pending": summary.pending,
+        "entries": [
+            {
+                "id": str(e.id),
+                "email": e.email,
+                "name": e.name,
+                "use_case": e.use_case,
+                "source": e.source,
+                "created_at": e.created_at.isoformat(),
+                "converted_at": e.converted_at.isoformat() if e.converted_at else None,
+            }
+            for e in summary.latest_entries
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Billing (v1 launch)
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    email: str
+    success_url: str | None = None
+    cancel_url: str | None = None
+
+
+@app.post("/v1/billing/checkout")
+async def billing_checkout(
+    payload: CheckoutRequest,
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Create a Stripe Checkout session. Returns a mock session when Stripe is unconfigured."""
+    settings = get_settings()
+    session = await billing_q.create_checkout_session(
+        pool,
+        email=payload.email,
+        success_url=payload.success_url or settings.billing_success_url,
+        cancel_url=payload.cancel_url or settings.billing_cancel_url,
+    )
+    return {
+        "session_id": session.session_id,
+        "url": session.url,
+        "is_mock": session.is_mock,
+    }
+
+
+@app.get("/v1/billing/status")
+async def billing_status(
+    email: str = Query(...),
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Return the subscription status for an email address."""
+    sub = await billing_q.get_subscription_status(pool, email=email)
+    if sub is None:
+        return {"email": email, "status": "none", "plan": None}
+    return {
+        "email": sub.email,
+        "status": sub.status,
+        "plan": sub.plan,
+        "created_at": sub.created_at.isoformat(),
+        "updated_at": sub.updated_at.isoformat(),
+    }
+
+
+@app.post("/v1/billing/webhook")
+async def billing_webhook(
+    request: Any,
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Stripe webhook handler. Verifies signature and updates subscription state."""
+    from fastapi import Request
+    if not isinstance(request, Request):  # pragma: no cover
+        raise HTTPException(status_code=400, detail="invalid request")
+    body = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        result = await billing_q.handle_stripe_webhook(pool, payload_bytes=body, sig_header=sig)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": result}
+
+
+# ---------------------------------------------------------------------------
+# Paper-trading toggle (Open Question)
+# ---------------------------------------------------------------------------
+
+
+class PaperTradingUpdateRequest(BaseModel):
+    enabled: bool
+
+
+@app.get("/v1/paper-trading")
+async def get_paper_trading(
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Return the current paper-trading mode for the authenticated user."""
+    settings = get_settings()
+    status = await paper_trading_q.get_paper_trading_status(
+        pool, user_id=settings.journal_demo_user_email or "demo"
+    )
+    return {
+        "enabled": status.enabled,
+        "updated_at": status.updated_at.isoformat() if status.updated_at else None,
+    }
+
+
+@app.put("/v1/paper-trading")
+async def set_paper_trading(
+    payload: PaperTradingUpdateRequest,
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Enable or disable paper-trading mode."""
+    settings = get_settings()
+    status = await paper_trading_q.set_paper_trading(
+        pool,
+        user_id=settings.journal_demo_user_email or "demo",
+        enabled=payload.enabled,
+    )
+    return {
+        "enabled": status.enabled,
+        "updated_at": status.updated_at.isoformat() if status.updated_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# EOL monitor (M8.3)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/eol-monitor")
+async def eol_monitor_snapshot(
+    lookback_days: int = Query(30, ge=1, le=365),
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """End-of-life convergence monitor: ramp-up, phantom-edge suppression, last-hour FP rate."""
+    from dataclasses import asdict
+    import math
+    asked_at = datetime.now(tz=UTC)
+    report = await eol_q.run_eol_monitor(ch, asked_at=asked_at, lookback_days=lookback_days)
+
+    def _clean(obj: Any) -> Any:
+        if isinstance(obj, float) and math.isnan(obj):
+            return None
+        return obj
+
+    raw = asdict(report)
+    raw["as_of"] = report.as_of.isoformat()
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Decision-time metrics (M8.5)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/decision-time-metrics")
+async def decision_time_metrics(
+    window_hours: int = Query(48, ge=1, le=168),
+    ch: AsyncClient = Depends(get_ch),
+    pool: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    """Compute (and persist) median time-to-decision for market calls."""
+    from dataclasses import asdict
+    settings = get_settings()
+    report = await dtm_q.run_decision_time_monitor(
+        ch,
+        pool,
+        window_hours=window_hours,
+        persist=True,
+    )
+    raw = asdict(report)
+    raw["as_of"] = report.as_of.isoformat()
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# Source failure audit (M5)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/source-failure-audit")
+async def source_failure_audit(
+    window_hours: int = Query(24, ge=1, le=168),
+    ch: AsyncClient = Depends(get_ch),
+) -> dict[str, Any]:
+    """M5 exit-criteria audit: P0/P1 source failure rates vs 1% SLA."""
+    from dataclasses import asdict
+    settings = get_settings()
+    p0_p1 = sfa_q._load_p0_p1_list(settings.p0_p1_sources_file)
+    report = await sfa_q.run_source_failure_audit(
+        ch,
+        window_hours=window_hours,
+        failure_rate_threshold=settings.source_failure_audit_threshold,
+        p0_p1_sources=p0_p1,
+    )
+    raw = asdict(report)
+    raw["as_of"] = report.as_of.isoformat()
+    return raw
+

@@ -121,6 +121,21 @@ class IngestSettings(BaseSettings):
     reddit_timeout_s: float = 15.0
     reddit_max_markets: int = 500
     reddit_max_related_markets: int = 5
+    # M4.1 Filtered-list (KOL) ingestion. The config maps category names to
+    # author lists; matched authors are stamped with metadata.kol_categories
+    # + metadata.is_kol so downstream social-feature aggregation can weight
+    # KOL-tagged posts. Today's source is Reddit (case-insensitive author
+    # match against the Reddit username); the same JSON shape supports X
+    # handles once §11.3 is decided. When unset or the file is missing the
+    # ingest worker no-ops the KOL stamping path and behaves exactly as
+    # before — backwards-compatible with existing deployments.
+    reddit_kol_lists_file: str | None = "services/ingest/data/kol_lists.json"
+    # M4.1 X/Twitter Basic API filtered-stream worker.
+    # Decision: paid Basic API ($100/mo) — see docs/decisions/twitter_source.md
+    x_bearer_token: str | None = None
+    x_filtered_stream_rules_file: str | None = "services/ingest/data/x_stream_rules.json"
+    x_ingest_max_markets: int = 500
+    x_ingest_max_related_markets: int = 5
     scheduled_events_interval_s: float = 3_600.0
     scheduled_events_file: str | None = "services/ingest/data/scheduled_events.json"
     scheduled_events_max_markets: int = 500

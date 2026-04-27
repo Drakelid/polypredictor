@@ -415,6 +415,17 @@ export default function MarketDetailPage() {
             </section>
           )}
 
+          {m?.distribution_samples != null && m.distribution_samples.length > 0 && (
+            <section className="mt-4">
+              <Card title="Distribution Samples">
+                 <DistributionChart samples={m.distribution_samples} />
+                 <div className="mt-3 text-xs text-gray-500">
+                   Percentile grid projection based on current market type and ensemble bounds.
+                 </div>
+              </Card>
+            </section>
+          )}
+
           <section className="mt-6">
             <Card title="Price & model history">
               {history.data && history.data.length > 1 ? (
@@ -790,3 +801,42 @@ function Badge({
     </span>
   );
 }
+
+function DistributionChart({ samples }: { samples: Array<[number, number]> }) {
+  const width = 960;
+  const height = 180;
+  const padX = 18;
+  const padY = 18;
+  const innerWidth = width - padX * 2;
+  const innerHeight = height - padY * 2;
+
+  // X axis is percentile (0 to 1)
+  // Y axis is value (often 0 to 1 or prices)
+  const minV = Math.min(...samples.map(s => s[1]), 0);
+  const maxV = Math.max(...samples.map(s => s[1]), 1);
+  const spanV = Math.max(maxV - minV, 1e-9);
+
+  const x = (pct: number) => padX + pct * innerWidth;
+  const y = (val: number) => padY + (1 - (val - minV) / spanV) * innerHeight;
+
+  let started = false;
+  const pathD = samples.map(([pct, val]) => {
+     const cmd = started ? "L" : "M";
+     started = true;
+     return `${cmd} ${x(pct)} ${y(val)}`;
+  }).join(" ");
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full overflow-visible mt-2">
+      <path d={pathD} fill="none" stroke="#818cf8" strokeWidth="2" />
+      {samples.map(([pct, val], i) => (
+        <circle key={i} cx={x(pct)} cy={y(val)} r="2" fill="#818cf8" />
+      ))}
+      <line x1={padX} y1={height - padY} x2={width - padX} y2={height - padY} stroke="#374151" />
+      <line x1={padX} y1={padY} x2={padX} y2={height - padY} stroke="#374151" />
+      <text x={padX} y={height - 2} className="fill-gray-500 text-[10px]">0th pct</text>
+      <text x={width - padX - 30} y={height - 2} className="fill-gray-500 text-[10px]">100th pct</text>
+    </svg>
+  );
+}
+

@@ -30,7 +30,6 @@ from typing import Any
 from .classifier import ClassificationResult, classify
 from .types import MarketType
 
-
 # Public for backwards compatibility — kept as an in-memory test sink. Real
 # enqueueing goes through the QueueWriter protocol.
 HUMAN_REVIEW_QUEUE: list[dict[str, Any]] = []
@@ -118,7 +117,7 @@ def classify_with_llm(
 
     try:
         suggestion = llm_callable(deterministic, inputs)
-    except Exception as exc:  # noqa: BLE001 — operator's callable owns its own retries
+    except Exception as exc:
         return _augment_reasons(
             deterministic,
             [f"LLM callable raised {exc.__class__.__name__}; falling back to deterministic"],

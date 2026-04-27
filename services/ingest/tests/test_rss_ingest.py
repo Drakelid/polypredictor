@@ -126,3 +126,118 @@ async def test_build_external_event_rows_matches_related_markets_and_dedupes() -
     assert payload["source"] == "rss:test"
     assert payload["source_id"] == "new-story"
     assert payload["related_markets"] == ["cond-btc"]
+
+
+def test_load_feed_specs_parses_scheduled_flag(tmp_path) -> None:
+    path = tmp_path / "feeds.json"
+    path.write_text(
+        """[
+            {"source": "rss:fed", "url": "https://example.com/fed.xml", "event_kind": "macro", "scheduled": true},
+            {"source": "rss:news", "url": "https://example.com/news.xml"}
+        ]""",
+        encoding="utf-8",
+    )
+
+    specs = load_feed_specs(str(path))
+
+    assert specs[0].source == "rss:fed"
+    assert specs[0].scheduled is True
+    assert specs[0].event_kind == "macro"
+    # Default is scheduled=False when the field is absent.
+    assert specs[1].source == "rss:news"
+    assert specs[1].scheduled is False
+
+
+@pytest.mark.asyncio
+async def test_build_external_event_rows_promotes_scheduled_flag_to_metadata() -> None:
+    """A FeedSpec with scheduled=True must surface metadata.scheduled=True
+    on every row from that feed so api.event_time picks them up as catalysts."""
+    import json as json_module
+
+    observed_at = datetime(2026, 4, 24, 12, tzinfo=UTC)
+    ch = _FakeClickHouse(
+        [
+            [],  # latest_active_markets
+            [],  # existing_source_ids -> nothing seen yet
+        ]
+    )
+
+    async def _fake_fetcher(spec: FeedSpec) -> list[FeedEntry]:
+        return [
+            FeedEntry(
+                source=spec.source,
+                source_uri=spec.url,
+                source_id="fomc-2026-04-30",
+                event_kind=spec.event_kind,
+                author="Federal Reserve",
+                title="FOMC statement, April 30, 2026",
+                body="Federal Reserve issues FOMC statement",
+                url="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260430a.htm",
+                event_time=observed_at,
+                metadata={},
+            )
+        ]
+
+    rows = await build_external_event_rows(
+        ch,
+        observed_at=observed_at,
+        specs=[
+            FeedSpec(
+                source="rss:fed_press_monetary",
+                url="https://www.federalreserve.gov/feeds/press_monetary.xml",
+                event_kind="macro",
+                scheduled=True,
+            )
+        ],
+        timeout_s=5.0,
+        max_markets=10,
+        max_related_markets=1,
+        fetcher=_fake_fetcher,
+    )
+
+    assert len(rows) == 1
+    payload = dict(zip(EXTERNAL_EVENTS_COLS, rows[0], strict=True))
+    metadata = json_module.loads(str(payload["metadata"]))
+    assert metadata["scheduled"] is True
+    assert payload["event_kind"] == "macro"
+
+
+@pytest.mark.asyncio
+async def test_build_external_event_rows_does_not_force_scheduled_when_disabled() -> None:
+    """A FeedSpec with scheduled=False must NOT inject metadata.scheduled."""
+    import json as json_module
+
+    observed_at = datetime(2026, 4, 24, 12, tzinfo=UTC)
+    ch = _FakeClickHouse([[], []])
+
+    async def _fake_fetcher(spec: FeedSpec) -> list[FeedEntry]:
+        return [
+            FeedEntry(
+                source=spec.source,
+                source_uri=spec.url,
+                source_id="news-1",
+                event_kind="news",
+                author=None,
+                title="Bitcoin rallies",
+                body="Demand surged",
+                url="https://example.com/news-1",
+                event_time=observed_at,
+                metadata={"feed": "coindesk"},
+            )
+        ]
+
+    rows = await build_external_event_rows(
+        ch,
+        observed_at=observed_at,
+        specs=[FeedSpec(source="rss:coindesk", url="https://example.com/rss.xml")],
+        timeout_s=5.0,
+        max_markets=10,
+        max_related_markets=1,
+        fetcher=_fake_fetcher,
+    )
+
+    assert len(rows) == 1
+    payload = dict(zip(EXTERNAL_EVENTS_COLS, rows[0], strict=True))
+    metadata = json_module.loads(str(payload["metadata"]))
+    assert "scheduled" not in metadata
+    assert metadata["feed"] == "coindesk"
