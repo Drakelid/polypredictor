@@ -19,4 +19,7 @@ RUN pnpm --filter @polypredictor/web build
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "pnpm --filter @polypredictor/web start -- --port ${PORT:-3000}"]
+# Next.js honours the PORT env var natively; passing --port via pnpm
+# leaks the literal `--` separator into next's argv (which then tries to
+# treat `--port` as a positional project directory).
+CMD ["sh", "-c", "PORT=${PORT:-3000} pnpm --filter @polypredictor/web start"]

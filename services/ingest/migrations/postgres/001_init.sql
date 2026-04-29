@@ -3,6 +3,11 @@
 -- Time-series signal + price history lives in ClickHouse.
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- CITEXT must be created BEFORE the users table since the email column uses
+-- the CITEXT type. Reordered 2026-04-28 — previous ordering let CREATE TABLE
+-- fail on first init when the extension hadn't loaded yet, leaving the users
+-- table missing for the rest of the boot.
+CREATE EXTENSION IF NOT EXISTS "citext";
 
 -- Users ----------------------------------------------------------------------
 
@@ -14,16 +19,23 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- CITEXT may not exist in all builds; fall back to LOWER() UNIQUE if absent.
--- (docker-entrypoint will continue on error for CREATE EXTENSION.)
-CREATE EXTENSION IF NOT EXISTS "citext";
-
--- Encrypted API keys (Polymarket CLOB keys for F7 user WSS journal auto-sync)
+-- Encrypted API keys (Polymarket CLOB keys plus provider credentials entered
+-- through the settings UI)
 -- Ciphertext is supplied by the app using a KMS-derived DEK; DB never sees plaintext.
 CREATE TABLE IF NOT EXISTS user_api_keys_encrypted (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider        TEXT NOT NULL CHECK (provider IN ('polymarket_clob')),
+    provider        TEXT NOT NULL CHECK (
+        provider IN (
+            'polymarket_clob',
+            'cme_fedwatch',
+            'x_api',
+            'reddit',
+            'glassnode',
+            'dune',
+            'stripe'
+        )
+    ),
     -- Opaque ciphertext blobs. Server decrypts only for outbound API calls.
     api_key_ct      BYTEA NOT NULL,
     api_secret_ct   BYTEA NOT NULL,

@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from polymarket_client import UserAuth
 
 from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 _AES_NONCE_LEN = 12
 
@@ -37,9 +37,14 @@ class ClobCredentialInput:
 async def get_credential_status(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
 ) -> ClobCredentialStatus:
-    user_id = await ensure_demo_user(pool, settings)
+    # Settings is kept in the signature for callers that thread it through;
+    # this read path doesn't currently need it but leaving it absent would
+    # force every caller to skip the kwarg.
+    del settings
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -65,10 +70,11 @@ async def get_credential_status(
 async def update_credentials(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
     payload: ClobCredentialInput,
 ) -> ClobCredentialStatus:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     api_key = (payload.api_key or "").strip()
     api_secret = (payload.api_secret or "").strip()
     passphrase = (payload.passphrase or "").strip()
@@ -125,9 +131,10 @@ async def update_credentials(
 async def load_user_auth(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
 ) -> UserAuth | None:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -162,6 +169,13 @@ def _decode_encryption_key(settings: Settings) -> bytes:
     if len(key) != 32:
         raise ValueError("USER_SECRET_ENCRYPTION_KEY_B64 must decode to 32 bytes")
     return key
+
+
+def validate_secret_encryption_key(settings: Settings) -> None:
+    """Fail fast when environments that can store credentials lack a real key."""
+    if getattr(settings, "app_env", "development") in {"development", "test", "local"}:
+        return
+    _decode_encryption_key(settings)
 
 
 def _encrypt_secret(value: str, key: bytes) -> bytes:

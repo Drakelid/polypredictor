@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any, cast
 
 from clickhouse_connect.driver.asyncclient import AsyncClient
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from . import asof as asof_q
 from . import auth as auth_q
 from . import backtest_report as backtest_report_q
 from . import beta_onboarding as beta_onboarding_q
+from . import billing as billing_q
 from . import classification_review as classification_review_q
 from . import clob_credentials as clob_credentials_q
 from . import concentration as concentration_q
 from . import cost_watch as cost_watch_q
+from . import decision_time_monitor as dtm_q
 from . import dp_aggregates as dp_aggregates_q
 from . import drift_report as drift_report_q
+from . import eol_monitor as eol_q
 from . import error_reports as error_reports_q
 from . import event_time as event_time_q
 from . import external_events as external_events_q
@@ -28,11 +34,14 @@ from . import features as features_q
 from . import journal as journal_q
 from . import journal_autosync as journal_autosync_q
 from . import markets as markets_q
+from . import migrations as migrations_q
 from . import model_admin as model_admin_q
 from . import onchain_metrics as onchain_metrics_q
+from . import paper_trading as paper_trading_q
 from . import polymarket_account as polymarket_account_q
 from . import privacy_audit as privacy_audit_q
 from . import privacy_prefs as privacy_prefs_q
+from . import provider_credentials as provider_credentials_q
 from . import push_prefs as push_prefs_q
 from . import regime as regime_q
 from . import regulatory_watch as regulatory_watch_q
@@ -40,14 +49,10 @@ from . import security_audit as security_audit_q
 from . import signals as signals_q
 from . import smart_money as smart_money_q
 from . import social_features as social_features_q
+from . import source_failure_audit as sfa_q
 from . import source_health as source_health_q
 from . import system_status as system_status_q
 from . import tuning as tuning_q
-from . import billing as billing_q
-from . import decision_time_monitor as dtm_q
-from . import eol_monitor as eol_q
-from . import paper_trading as paper_trading_q
-from . import source_failure_audit as sfa_q
 from . import waitlist as waitlist_q
 from .clickhouse import get_async_client
 from .postgres import get_async_pool
@@ -56,12 +61,22 @@ from .settings import get_settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    clob_credentials_q.validate_secret_encryption_key(settings)
     app.state.ch = await get_async_client()
     app.state.pg = await get_async_pool()
+    if settings.postgres_migrations_apply_on_startup:
+        await migrations_q.apply_postgres_migrations(
+            app.state.pg, settings.postgres_migrations_dir
+        )
+    if settings.clickhouse_migrations_apply_on_startup:
+        await migrations_q.apply_clickhouse_migrations(
+            app.state.ch, settings.clickhouse_migrations_dir
+        )
     app.state.journal_auto_sync = journal_autosync_q.UserJournalAutoSyncService(
         pool=app.state.pg,
         ch=app.state.ch,
-        settings=get_settings(),
+        settings=settings,
     )
     await app.state.journal_auto_sync.refresh()
     try:
@@ -73,6 +88,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="PolyPredictor API", version="0.0.1", lifespan=lifespan)
+
+_settings_for_app = get_settings()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        origin.strip()
+        for origin in _settings_for_app.cors_allow_origins.split(",")
+        if origin.strip()
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["content-type"],
+)
 
 
 def get_ch() -> Any:
@@ -88,6 +116,89 @@ def get_pg() -> Any:
 # place owns the wiring.
 app.dependency_overrides[auth_q.get_pool_dependency] = get_pg
 app.include_router(auth_q.router)
+
+
+class _MinuteRateLimiter:
+    def __init__(self) -> None:
+        self._hits: dict[str, list[float]] = {}
+
+    def allow(self, key: str, *, limit: int) -> bool:
+        if limit <= 0:
+            return True
+        now = monotonic()
+        cutoff = now - 60
+        hits = [hit for hit in self._hits.get(key, []) if hit > cutoff]
+        if len(hits) >= limit:
+            self._hits[key] = hits
+            return False
+        hits.append(now)
+        self._hits[key] = hits
+        return True
+
+
+class _StackDedupe:
+    """In-memory TTL set for error-report stack hashes.
+
+    `seen()` records the hash and returns `True` if the same hash was
+    recorded within `window_seconds`. Old entries are evicted lazily on each
+    call so the dict stays bounded by the count of distinct stacks in the
+    last window.
+    """
+
+    def __init__(self) -> None:
+        self._last_seen: dict[str, float] = {}
+
+    def seen(self, key: str, *, window_seconds: float) -> bool:
+        if window_seconds <= 0 or not key:
+            return False
+        now = monotonic()
+        cutoff = now - window_seconds
+        # Evict old entries opportunistically.
+        if len(self._last_seen) > 4096:
+            self._last_seen = {k: t for k, t in self._last_seen.items() if t > cutoff}
+        prior = self._last_seen.get(key)
+        self._last_seen[key] = now
+        return prior is not None and prior > cutoff
+
+
+_error_report_limiter = _MinuteRateLimiter()
+_error_report_dedupe = _StackDedupe()
+
+
+def _client_ip(request: Request) -> str:
+    """Return the originating client IP, honoring `X-Forwarded-For`.
+
+    Render and most managed platforms put the load-balancer IP in
+    `request.client.host`; the original client lives in the first
+    comma-separated entry of `X-Forwarded-For`.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        first = forwarded.split(",", 1)[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client is not None else "unknown"
+
+
+def _error_report_fingerprint(payload: ErrorReportRequest) -> str:
+    """Stable hash that identifies "the same" error report.
+
+    Uses the stack when present (the strongest signal) and falls back to
+    `source|severity|message|url` so message-only browser errors still
+    deduplicate.
+    """
+    if payload.stack:
+        material = payload.stack
+    else:
+        material = "|".join(
+            [
+                payload.source,
+                payload.severity,
+                payload.message,
+                payload.url or "",
+            ]
+        )
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
 
 
 class JournalCallCreateRequest(BaseModel):
@@ -124,6 +235,10 @@ class ClobCredentialRequest(BaseModel):
     api_secret: str | None = None
     passphrase: str | None = None
     proxy_wallet: str | None = None
+
+
+class ProviderCredentialRequest(BaseModel):
+    values: dict[str, str | None] = Field(default_factory=dict)
 
 
 class PolymarketAddressRequest(BaseModel):
@@ -195,13 +310,41 @@ async def system_status(
 
 @app.post("/v1/error-reports", status_code=202)
 async def create_error_report(
+    request: Request,
     payload: ErrorReportRequest,
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
+    settings = get_settings()
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            body_size = int(content_length)
+        except ValueError:
+            body_size = settings.error_reports_max_body_bytes + 1
+        if body_size > settings.error_reports_max_body_bytes:
+            raise HTTPException(status_code=413, detail="error report too large")
+    client_host = _client_ip(request)
+    if not _error_report_limiter.allow(
+        client_host,
+        limit=settings.error_reports_rate_limit_per_minute,
+    ):
+        raise HTTPException(status_code=429, detail="too many error reports")
+    fingerprint = _error_report_fingerprint(payload)
+    if _error_report_dedupe.seen(
+        fingerprint,
+        window_seconds=settings.error_reports_dedupe_window_seconds,
+    ):
+        return {
+            "id": None,
+            "source": payload.source,
+            "severity": payload.severity,
+            "reported_at": datetime.now(tz=UTC).isoformat(),
+            "deduped": True,
+        }
     try:
         report = await error_reports_q.record_error_report(
             pool=pg,
-            settings=get_settings(),
+            settings=settings,
             payload=error_reports_q.ErrorReportInput(
                 source=cast(error_reports_q.ErrorSource, payload.source),
                 severity=cast(error_reports_q.ErrorSeverity, payload.severity),
@@ -219,6 +362,7 @@ async def create_error_report(
         "source": report.source,
         "severity": report.severity,
         "reported_at": report.reported_at.isoformat(),
+        "deduped": False,
     }
 
 
@@ -461,7 +605,9 @@ async def markets_list(
     """
     asked_at = datetime.now(tz=UTC)
     settings = get_settings()
-    tuning_profile = await tuning_q.get_active_profile(pool=pg, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(
+        pool=pg, email=settings.journal_demo_user_email
+    )
     rows = await markets_q.list_markets(
         ch,
         asked_at=asked_at,
@@ -562,7 +708,9 @@ async def backtest_walk_forward_report(
 ) -> dict[str, Any]:
     asked_at = datetime.now(tz=UTC)
     settings = get_settings()
-    tuning_profile = await tuning_q.get_active_profile(pool=pg, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(
+        pool=pg, email=settings.journal_demo_user_email
+    )
     report = await backtest_report_q.build_backtest_ui_report(
         ch,
         asked_at=asked_at,
@@ -655,7 +803,9 @@ async def market_model(
     """
     asked_at = datetime.now(tz=UTC)
     settings = get_settings()
-    tuning_profile = await tuning_q.get_active_profile(pool=pg, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(
+        pool=pg, email=settings.journal_demo_user_email
+    )
     detail = await markets_q.model_for_market(
         ch,
         condition_id=condition_id,
@@ -1057,10 +1207,10 @@ async def onchain_metrics_feed(
 
 @app.get("/v1/push-preferences")
 async def push_preferences(
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
-    prefs = await push_prefs_q.get_preferences(pool=pg, settings=settings)
+    prefs = await push_prefs_q.get_preferences(pool=pg, email=user_email)
     return {
         "email_enabled": prefs.email_enabled,
         "email_to": prefs.email_to,
@@ -1075,10 +1225,10 @@ async def push_preferences(
 
 @app.get("/v1/privacy-preferences")
 async def privacy_preferences(
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
-    prefs = await privacy_prefs_q.get_preferences(pool=pg, settings=settings)
+    prefs = await privacy_prefs_q.get_preferences(pool=pg, email=user_email)
     return {
         "cross_user_learning_opt_in": prefs.cross_user_learning_opt_in,
         "updated_at": prefs.updated_at.isoformat() if prefs.updated_at else None,
@@ -1131,12 +1281,12 @@ async def privacy_audit_feed(
 @app.put("/v1/privacy-preferences")
 async def update_privacy_preferences(
     payload: PrivacyPreferencesRequest,
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
     prefs = await privacy_prefs_q.update_preferences(
         pool=pg,
-        settings=settings,
+        email=user_email,
         payload=privacy_prefs_q.PrivacyPreferencesInput(
             cross_user_learning_opt_in=payload.cross_user_learning_opt_in,
         ),
@@ -1150,13 +1300,13 @@ async def update_privacy_preferences(
 @app.put("/v1/push-preferences")
 async def update_push_preferences(
     payload: PushPreferencesRequest,
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
     try:
         prefs = await push_prefs_q.update_preferences(
             pool=pg,
-            settings=settings,
+            email=user_email,
             payload=push_prefs_q.PushPreferencesInput(
                 email_enabled=payload.email_enabled,
                 email_to=payload.email_to,
@@ -1183,11 +1333,13 @@ async def update_push_preferences(
 
 @app.get("/v1/polymarket-address")
 async def polymarket_address(
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     settings = get_settings()
     link = await polymarket_account_q.get_linked_address(
         pool=pg,
+        email=user_email,
         settings=settings,
     )
     return {
@@ -1226,10 +1378,13 @@ async def polymarket_address(
 
 @app.get("/v1/polymarket-clob-credentials")
 async def polymarket_clob_credentials(
+    user_email: str = Depends(auth_q.current_user_email),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     settings = get_settings()
-    status = await clob_credentials_q.get_credential_status(pool=pg, settings=settings)
+    status = await clob_credentials_q.get_credential_status(
+        pool=pg, email=user_email, settings=settings
+    )
     return {
         "configured": status.configured,
         "proxy_wallet": status.proxy_wallet,
@@ -1241,12 +1396,14 @@ async def polymarket_clob_credentials(
 @app.put("/v1/polymarket-clob-credentials")
 async def update_polymarket_clob_credentials(
     payload: ClobCredentialRequest,
+    user_email: str = Depends(auth_q.current_user_email),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     settings = get_settings()
     try:
         status = await clob_credentials_q.update_credentials(
             pool=pg,
+            email=user_email,
             settings=settings,
             payload=clob_credentials_q.ClobCredentialInput(
                 api_key=payload.api_key,
@@ -1269,12 +1426,14 @@ async def update_polymarket_clob_credentials(
 @app.put("/v1/polymarket-address")
 async def update_polymarket_address(
     payload: PolymarketAddressRequest,
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     settings = get_settings()
     try:
         link = await polymarket_account_q.update_linked_address(
             pool=pg,
+            email=user_email,
             settings=settings,
             payload=polymarket_account_q.PolymarketAddressInput(
                 proxy_wallet=payload.proxy_wallet,
@@ -1314,6 +1473,69 @@ async def update_polymarket_address(
             else None
         ),
     }
+
+
+def _provider_credential_status_payload(
+    status: provider_credentials_q.ProviderCredentialStatus,
+) -> dict[str, Any]:
+    return {
+        "provider": status.provider,
+        "label": status.label,
+        "description": status.description,
+        "fields": [
+            {
+                "name": field.name,
+                "label": field.label,
+                "secret": field.secret,
+                "required": field.required,
+                "placeholder": field.placeholder,
+            }
+            for field in status.fields
+        ],
+        "configured": status.configured,
+        "configured_fields": list(status.configured_fields),
+        "created_at": status.created_at.isoformat() if status.created_at else None,
+        "rotated_at": status.rotated_at.isoformat() if status.rotated_at else None,
+    }
+
+
+@app.get("/v1/provider-credentials")
+async def provider_credentials(
+    user_email: str = Depends(auth_q.current_user_email),
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    settings = get_settings()
+    statuses = await provider_credentials_q.list_credential_statuses(
+        pool=pg,
+        email=user_email,
+        settings=settings,
+    )
+    return {
+        "providers": [_provider_credential_status_payload(status) for status in statuses],
+    }
+
+
+@app.put("/v1/provider-credentials/{provider}")
+async def update_provider_credentials(
+    provider: str,
+    payload: ProviderCredentialRequest,
+    user_email: str = Depends(auth_q.current_user_email),
+    pg: Any = Depends(get_pg),
+) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        status = await provider_credentials_q.update_provider_credentials(
+            pool=pg,
+            email=user_email,
+            settings=settings,
+            provider=provider,
+            values=payload.values,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if provider == "polymarket_clob":
+        await app.state.journal_auto_sync.refresh()
+    return _provider_credential_status_payload(status)
 
 
 @app.get("/v1/markets/{condition_id}/concentration")
@@ -1431,7 +1653,9 @@ async def market_history(
 ) -> list[dict[str, Any]]:
     asked_at = datetime.now(tz=UTC)
     settings = get_settings()
-    tuning_profile = await tuning_q.get_active_profile(pool=pg, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(
+        pool=pg, email=settings.journal_demo_user_email
+    )
     rows = await markets_q.history_for_market(
         ch,
         condition_id=condition_id,
@@ -1452,11 +1676,14 @@ async def market_history(
 
 @app.get("/v1/journal/calls")
 async def journal_calls(
+    user_email: str = Depends(auth_q.current_user_email),
     ch: AsyncClient = Depends(get_ch),
     pg: Any = Depends(get_pg),
 ) -> list[dict[str, Any]]:
     settings = get_settings()
-    rows = await journal_q.list_calls(pool=pg, ch=ch, settings=settings)
+    rows = await journal_q.list_calls(
+        pool=pg, ch=ch, email=user_email, settings=settings
+    )
     return [
         {
             "id": row.id,
@@ -1485,6 +1712,7 @@ async def journal_calls(
 @app.post("/v1/journal/calls")
 async def create_journal_call(
     payload: JournalCallCreateRequest,
+    user_email: str = Depends(auth_q.current_user_email),
     ch: AsyncClient = Depends(get_ch),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
@@ -1493,6 +1721,7 @@ async def create_journal_call(
         row = await journal_q.create_manual_call(
             pool=pg,
             ch=ch,
+            email=user_email,
             settings=settings,
             payload=journal_q.CreateJournalCallInput(
                 condition_id=payload.condition_id,
@@ -1518,11 +1747,14 @@ async def create_journal_call(
 
 @app.get("/v1/journal/summary")
 async def journal_summary(
+    user_email: str = Depends(auth_q.current_user_email),
     ch: AsyncClient = Depends(get_ch),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     settings = get_settings()
-    summary = await journal_q.summary(pool=pg, ch=ch, settings=settings)
+    summary = await journal_q.summary(
+        pool=pg, ch=ch, email=user_email, settings=settings
+    )
     return {
         "total_calls": summary.total_calls,
         "resolved_calls": summary.resolved_calls,
@@ -1573,10 +1805,10 @@ async def journal_summary(
 
 @app.get("/v1/tuning-profile")
 async def tuning_profile(
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
-    profile = await tuning_q.get_active_profile(pool=pg, settings=settings)
+    profile = await tuning_q.get_active_profile(pool=pg, email=user_email)
     return {
         "name": profile.name,
         "preset": profile.preset,
@@ -1589,13 +1821,13 @@ async def tuning_profile(
 @app.put("/v1/tuning-profile")
 async def update_tuning_profile(
     payload: TuningProfileRequest,
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
-    settings = get_settings()
     try:
         profile = await tuning_q.update_active_profile(
             pool=pg,
-            settings=settings,
+            email=user_email,
             payload=tuning_q.TuningProfileInput(
                 preset=payload.preset,
                 log_odds_shifts=payload.log_odds_shifts,
@@ -1615,8 +1847,10 @@ async def update_tuning_profile(
 @app.get("/v1/admin/classification-review")
 async def admin_classification_review_list(
     limit: int = Query(50, ge=1, le=500),
+    admin_email: str = Depends(auth_q.current_admin_email),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
+    del admin_email
     """List pending market-classification reviews oldest-first."""
     rows = await classification_review_q.list_pending_reviews(pool=pg, limit=limit)
     return {
@@ -1648,8 +1882,10 @@ async def admin_classification_review_list(
 async def admin_classification_review_decide(
     review_id: str,
     payload: ClassificationReviewDecisionRequest,
+    admin_email: str = Depends(auth_q.current_admin_email),
     pg: Any = Depends(get_pg),
 ) -> dict[str, Any]:
+    del admin_email
     """Record a human decision against a pending classification review."""
     try:
         decision = await classification_review_q.submit_review(
@@ -1674,8 +1910,10 @@ async def admin_classification_review_decide(
 async def admin_re_enable_model_type(
     market_type: str,
     payload: ModelDisableTransitionRequest | None = None,
+    admin_email: str = Depends(auth_q.current_admin_email),
     ch: AsyncClient = Depends(get_ch),
 ) -> dict[str, Any]:
+    del admin_email
     """Manually flip an auto-disabled per-type model back to enabled.
 
     Appends a ``re_enabled`` row to ``model_disable_log``; the asof reader
@@ -1701,8 +1939,10 @@ async def admin_re_enable_model_type(
 async def admin_disable_model_type(
     market_type: str,
     payload: ModelDisableTransitionRequest | None = None,
+    admin_email: str = Depends(auth_q.current_admin_email),
     ch: AsyncClient = Depends(get_ch),
 ) -> dict[str, Any]:
+    del admin_email
     """Manually disable a per-type model.
 
     Pre-emptively bypasses the ensemble before the next nightly drift
@@ -1765,8 +2005,10 @@ async def waitlist_signup(
 @app.get("/v1/waitlist")
 async def waitlist_admin(
     limit: int = Query(100, ge=1, le=500),
+    admin_email: str = Depends(auth_q.current_admin_email),
     pool: Any = Depends(get_pg),
 ) -> dict[str, Any]:
+    del admin_email
     """Admin summary of the public waitlist."""
     settings = get_settings()
     summary = await waitlist_q.get_waitlist_summary(pool, limit=min(limit, settings.waitlist_limit))
@@ -1803,13 +2045,31 @@ class CheckoutRequest(BaseModel):
 @app.post("/v1/billing/checkout")
 async def billing_checkout(
     payload: CheckoutRequest,
+    user_email: str = Depends(auth_q.current_user_email),
     pool: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     """Create a Stripe Checkout session. Returns a mock session when Stripe is unconfigured."""
     settings = get_settings()
+    stripe_creds = await provider_credentials_q.load_provider_credentials(
+        pool=pool,
+        email=settings.journal_demo_user_email,
+        settings=settings,
+        provider="stripe",
+    )
+    if stripe_creds:
+        settings = settings.model_copy(
+            update={
+                "stripe_secret_key": stripe_creds.get("secret_key") or settings.stripe_secret_key,
+                "stripe_price_id": stripe_creds.get("price_id") or settings.stripe_price_id,
+                "stripe_webhook_secret": (
+                    stripe_creds.get("webhook_secret") or settings.stripe_webhook_secret
+                ),
+            }
+        )
     session = await billing_q.create_checkout_session(
         pool,
-        email=payload.email,
+        settings=settings,
+        email=user_email,
         success_url=payload.success_url or settings.billing_success_url,
         cancel_url=payload.cancel_url or settings.billing_cancel_url,
     )
@@ -1823,9 +2083,12 @@ async def billing_checkout(
 @app.get("/v1/billing/status")
 async def billing_status(
     email: str = Query(...),
+    user_email: str = Depends(auth_q.current_user_email),
     pool: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     """Return the subscription status for an email address."""
+    if email.strip().lower() != user_email.lower():
+        raise HTTPException(status_code=403, detail="cannot read another user's billing status")
     sub = await billing_q.get_subscription_status(pool, email=email)
     if sub is None:
         return {"email": email, "status": "none", "plan": None}
@@ -1850,7 +2113,28 @@ async def billing_webhook(
     body = await request.body()
     sig = request.headers.get("stripe-signature", "")
     try:
-        result = await billing_q.handle_stripe_webhook(pool, payload_bytes=body, sig_header=sig)
+        settings = get_settings()
+        stripe_creds = await provider_credentials_q.load_provider_credentials(
+            pool=pool,
+            settings=settings,
+            provider="stripe",
+        )
+        if stripe_creds:
+            settings = settings.model_copy(
+                update={
+                    "stripe_secret_key": stripe_creds.get("secret_key") or settings.stripe_secret_key,
+                    "stripe_price_id": stripe_creds.get("price_id") or settings.stripe_price_id,
+                    "stripe_webhook_secret": (
+                        stripe_creds.get("webhook_secret") or settings.stripe_webhook_secret
+                    ),
+                }
+            )
+        result = await billing_q.handle_stripe_webhook(
+            pool,
+            settings=settings,
+            payload_bytes=body,
+            sig_header=sig,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": result}
@@ -1867,13 +2151,11 @@ class PaperTradingUpdateRequest(BaseModel):
 
 @app.get("/v1/paper-trading")
 async def get_paper_trading(
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pool: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     """Return the current paper-trading mode for the authenticated user."""
-    settings = get_settings()
-    status = await paper_trading_q.get_paper_trading_status(
-        pool, user_id=settings.journal_demo_user_email or "demo"
-    )
+    status = await paper_trading_q.get_paper_trading_status(pool, email=user_email)
     return {
         "enabled": status.enabled,
         "updated_at": status.updated_at.isoformat() if status.updated_at else None,
@@ -1883,13 +2165,13 @@ async def get_paper_trading(
 @app.put("/v1/paper-trading")
 async def set_paper_trading(
     payload: PaperTradingUpdateRequest,
+    user_email: str = Depends(auth_q.current_user_email_or_demo),
     pool: Any = Depends(get_pg),
 ) -> dict[str, Any]:
     """Enable or disable paper-trading mode."""
-    settings = get_settings()
     status = await paper_trading_q.set_paper_trading(
         pool,
-        user_id=settings.journal_demo_user_email or "demo",
+        email=user_email,
         enabled=payload.enabled,
     )
     return {
@@ -1909,8 +2191,8 @@ async def eol_monitor_snapshot(
     ch: AsyncClient = Depends(get_ch),
 ) -> dict[str, Any]:
     """End-of-life convergence monitor: ramp-up, phantom-edge suppression, last-hour FP rate."""
-    from dataclasses import asdict
     import math
+    from dataclasses import asdict
     asked_at = datetime.now(tz=UTC)
     report = await eol_q.run_eol_monitor(ch, asked_at=asked_at, lookback_days=lookback_days)
 
@@ -1937,7 +2219,7 @@ async def decision_time_metrics(
 ) -> dict[str, Any]:
     """Compute (and persist) median time-to-decision for market calls."""
     from dataclasses import asdict
-    settings = get_settings()
+
     report = await dtm_q.run_decision_time_monitor(
         ch,
         pool,
@@ -1972,4 +2254,3 @@ async def source_failure_audit(
     raw = asdict(report)
     raw["as_of"] = report.as_of.isoformat()
     return raw
-

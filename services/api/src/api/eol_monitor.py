@@ -1,19 +1,24 @@
-"""M8.3 End-of-life convergence monitoring.
+"""M8.3 End-of-life convergence monitoring (PRD §6.8).
 
-The three unchecked M8.3 tasks are:
+Three operational checks, each backed by a separate ClickHouse query:
 
-1. **Ramp-up check** — verify that markets in the final 5% of their life
-   have an appropriately elevated model certainty (the model should be
-   converging toward resolution, not uncertain).
+1. **Ramp-up check** — for every market currently in the final 5% of its
+   life, compute the expected ``final_life_market_mid_weight`` (the same
+   value the markets serve path applies). The aggregate report shows how
+   many live markets are inside the convergence ramp and how many are
+   inside the final-hour phantom window so operators can spot when the
+   gate is engaging.
 
-2. **Phantom-edge suppression check** — verify that edge/Kelly alerts
-   emitted in the last hour before resolution are suppressed (tagged with
-   the ``resolution_risk_suppressed`` flag) when ``resolution_risk_score``
-   exceeds the configured threshold.
+2. **Phantom-edge density** — count signal-feed events whose ``event_time``
+   landed within the final hour before resolution over the lookback. The
+   markets API suppresses ``edge_bps`` in that window
+   (:func:`api.eol_convergence.should_suppress_phantom_edge`); independent
+   signal-emitting workers (whale_flow, arb_checker, microstructure) do
+   not, so this number tracks the residual exposure.
 
-3. **Last-hour FP retrospective** — compute the empirical false-positive
-   rate for alerts fired in the hour immediately before resolution, using
-   actual binary resolutions as ground truth.
+3. **Last-hour FP retrospective** — for the same final-hour alerts, join
+   against the first ``market_resolutions`` row per condition_id and
+   compute the false-positive rate. Target is 15% per the M8.5 guardrail.
 
 All three results are packaged into an :class:`EolMonitorReport` and
 exposed at ``GET /v1/eol-monitor``.
@@ -30,8 +35,8 @@ from typing import Any
 
 from clickhouse_connect.driver.asyncclient import AsyncClient
 
+from . import eol_convergence as eol_q
 from .clickhouse import get_async_client
-from .settings import Settings, get_settings
 
 
 # ---------------------------------------------------------------------------
@@ -41,25 +46,32 @@ from .settings import Settings, get_settings
 
 @dataclass(frozen=True)
 class RampUpResult:
-    """Markets in the final 5% of their life."""
+    """Markets currently inside the EOL convergence ramp."""
 
     markets_checked: int
-    markets_with_high_certainty: int
-    """Certainty = band width < 0.15 (model has converged)."""
-    markets_with_low_certainty: int
-    high_certainty_rate: float
+    """Total active markets evaluated (all live markets with ``end_date``)."""
+    markets_in_ramp: int
+    """Markets inside the final 5% of life (weight > 0)."""
+    markets_in_phantom_window: int
+    """Markets inside the final hour (edge gate is engaged)."""
+    mean_convergence_weight: float
+    """Mean weight across markets currently inside the ramp; 0.0 if none."""
+    max_convergence_weight: float
+    """Max weight observed across markets currently inside the ramp."""
     sample_market_ids: list[str]
+    """Up to 5 condition_ids inside the ramp, ordered by descending weight."""
 
 
 @dataclass(frozen=True)
 class PhantomEdgeResult:
-    """Snapshot of edge-alert suppression in the final hour before resolution."""
+    """Density of signal-feed alerts firing in the final hour before resolution."""
 
     alerts_in_final_hour: int
-    alerts_suppressed: int
-    alerts_not_suppressed: int
-    suppression_rate: float
-    sample_unsuppressed_ids: list[str]
+    """Alerts whose ``event_time`` landed within ``window_hours`` of ``end_date``."""
+    alerts_per_day: float
+    """``alerts_in_final_hour / lookback_days`` — operational density signal."""
+    sample_condition_ids: list[str]
+    """Up to 5 distinct condition_ids that fired alerts in the window."""
 
 
 @dataclass(frozen=True)
@@ -72,7 +84,7 @@ class LastHourFpResult:
     skipped_unresolved: int
     fp_rate: float | None
     meets_target: bool
-    """Target: FP rate < 15% (M8.5 guardrail from alert_outcome_audit)."""
+    """Target: FP rate < 15% (PRD §8 guardrail; mirrors :mod:`api.alert_outcome_audit`)."""
 
 
 @dataclass(frozen=True)
@@ -85,38 +97,43 @@ class EolMonitorReport:
 
 
 # ---------------------------------------------------------------------------
-# 1. Ramp-up check
+# Constants
 # ---------------------------------------------------------------------------
 
-_FINAL_LIFE_FRACTION = 0.05  # last 5% of market life
-_CERTAINTY_BAND_THRESHOLD = 0.15  # band width below this → high certainty
+_PHANTOM_EDGE_WINDOW_HOURS = 1
+_EDGE_SIGNAL_TYPES = ("whale_open", "whale_resize", "arb", "large_print", "book_shock")
+_FP_TARGET = 0.15
+
+
+# ---------------------------------------------------------------------------
+# 1. Ramp-up check
+# ---------------------------------------------------------------------------
 
 
 async def check_ramp_up_on_live_markets(
     ch: AsyncClient,
     asked_at: datetime,
 ) -> RampUpResult:
-    """Check that markets in the final 5% of their life have converged.
+    """Aggregate convergence-weight stats over currently live markets.
 
-    We query ``markets_snapshots`` for active markets where
-    ``(end_date - asked_at) / (end_date - first_observed_at) < 0.05``
-    and then check the latest conformal band width from ``market_quotes``
-    as a proxy for model certainty.
+    For each active market with an ``end_date`` strictly in the future, we
+    derive ``time_to_resolution_s`` (now → end_date) and ``total_life_s``
+    (``MIN(observed_at)`` → end_date) directly in SQL, then run the same
+    pure :func:`eol_convergence.final_life_market_mid_weight` the markets
+    serve path applies. The resulting report is read-only — it never
+    mutates any model state.
     """
     query = """
         SELECT
-            ms.condition_id,
-            ms.end_date,
-            ms.observed_at AS first_observed_at
-        FROM markets_snapshots ms
-        WHERE ms.active = 1
-          AND ms.closed = 0
-          AND ms.archived = 0
-          AND ms.end_date IS NOT NULL
-          AND ms.end_date > {asof:DateTime64(3)}
-          AND ms.observed_at <= {asof:DateTime64(3)}
-        ORDER BY ms.condition_id, ms.observed_at ASC
-        LIMIT 1 BY ms.condition_id
+            condition_id,
+            anyLast(end_date)        AS end_date,
+            min(observed_at)         AS first_observed_at,
+            anyLast(active)          AS active,
+            anyLast(closed)          AS closed,
+            anyLast(archived)        AS archived
+        FROM markets_snapshots
+        WHERE observed_at <= {asof:DateTime64(3)}
+        GROUP BY condition_id
     """
     try:
         result = await ch.query(query, parameters={"asof": asked_at})
@@ -124,111 +141,93 @@ async def check_ramp_up_on_live_markets(
     except Exception:
         rows = []
 
-    final_life_ids: list[str] = []
+    weights: list[tuple[str, float]] = []
+    in_phantom = 0
+    markets_checked = 0
     for row in rows:
         condition_id = str(row[0])
         end_date: Any = row[1]
         first_obs: Any = row[2]
+        active = bool(row[3]) if row[3] is not None else False
+        closed = bool(row[4]) if row[4] is not None else False
+        archived = bool(row[5]) if row[5] is not None else False
+        if not active or closed or archived:
+            continue
         if end_date is None or first_obs is None:
             continue
-        if not hasattr(end_date, "timestamp"):
+        if not hasattr(end_date, "timestamp") or not hasattr(first_obs, "timestamp"):
             continue
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=UTC)
+        if first_obs.tzinfo is None:
+            first_obs = first_obs.replace(tzinfo=UTC)
+        if end_date <= asked_at:
+            continue  # already past end_date — out of scope for live monitoring
+        markets_checked += 1
+        ttr_s = (end_date - asked_at).total_seconds()
         total_life_s = (end_date - first_obs).total_seconds()
-        remaining_s = (end_date - asked_at).total_seconds()
         if total_life_s <= 0:
             continue
-        fraction_remaining = remaining_s / total_life_s
-        if fraction_remaining < _FINAL_LIFE_FRACTION:
-            final_life_ids.append(condition_id)
+        weight = eol_q.final_life_market_mid_weight(ttr_s, total_life_s)
+        if weight is None or weight <= 0.0:
+            continue
+        weights.append((condition_id, weight))
+        if eol_q.should_suppress_phantom_edge(ttr_s):
+            in_phantom += 1
 
-    if not final_life_ids:
+    if not weights:
         return RampUpResult(
-            markets_checked=0,
-            markets_with_high_certainty=0,
-            markets_with_low_certainty=0,
-            high_certainty_rate=1.0,
+            markets_checked=markets_checked,
+            markets_in_ramp=0,
+            markets_in_phantom_window=0,
+            mean_convergence_weight=0.0,
+            max_convergence_weight=0.0,
             sample_market_ids=[],
         )
 
-    # Fetch latest conformal band width for these markets.
-    # We use the spread and book imbalance from market_features as a proxy
-    # (smaller spread → more liquid → typically more certain mid-price).
-    # A real convergence check would query served conformal bands from the
-    # model API at the PIT snapshot, but for the monitor we use the
-    # market_features spread as a lightweight signal.
-    band_query = """
-        SELECT condition_id, spread
-        FROM market_features
-        WHERE condition_id IN {ids:Array(String)}
-          AND observed_at <= {asof:DateTime64(3)}
-        ORDER BY condition_id, observed_at DESC
-        LIMIT 1 BY condition_id
-    """
-    try:
-        band_result = await ch.query(
-            band_query,
-            parameters={"ids": final_life_ids, "asof": asked_at},
-        )
-        band_rows = band_result.result_rows
-    except Exception:
-        band_rows = []
-
-    high_certainty = 0
-    for brow in band_rows:
-        spread = float(brow[1]) if brow[1] is not None else 1.0
-        if spread < _CERTAINTY_BAND_THRESHOLD:
-            high_certainty += 1
-
-    total = len(final_life_ids)
-    low = total - high_certainty
-    rate = high_certainty / total if total > 0 else 1.0
+    weights.sort(key=lambda w: w[1], reverse=True)
+    avg = sum(w for _, w in weights) / len(weights)
     return RampUpResult(
-        markets_checked=total,
-        markets_with_high_certainty=high_certainty,
-        markets_with_low_certainty=low,
-        high_certainty_rate=round(rate, 4),
-        sample_market_ids=final_life_ids[:5],
+        markets_checked=markets_checked,
+        markets_in_ramp=len(weights),
+        markets_in_phantom_window=in_phantom,
+        mean_convergence_weight=round(avg, 4),
+        max_convergence_weight=round(weights[0][1], 4),
+        sample_market_ids=[cid for cid, _ in weights[:5]],
     )
 
 
 # ---------------------------------------------------------------------------
-# 2. Phantom-edge suppression check
+# 2. Phantom-edge density (signals that fired in the final hour)
 # ---------------------------------------------------------------------------
 
-_PHANTOM_EDGE_WINDOW_HOURS = 1  # final hour before resolution
-_EDGE_SIGNAL_TYPES = ("whale_open", "whale_resize", "arb", "large_print", "book_shock")
 
-
-async def check_phantom_edge_suppression(
+async def check_phantom_edge_density(
     ch: AsyncClient,
     asked_at: datetime,
     *,
     lookback_days: int = 30,
     window_hours: int = _PHANTOM_EDGE_WINDOW_HOURS,
 ) -> PhantomEdgeResult:
-    """Check that edge alerts fired in the final hour are suppressed.
+    """Count signal-feed alerts firing in the final ``window_hours`` of life.
 
-    Queries ``signal_events`` for events that fired within ``window_hours``
-    of the market's resolution date, and checks for the
-    ``resolution_risk_suppressed`` flag in the payload JSON.
+    Joins ``signal_events`` against the latest ``markets_snapshots`` row per
+    condition_id (PIT-correct via ``observed_at <= asked_at``). Only edge
+    signal types are counted (whale, arb, large prints, book shocks); event
+    notifications and pure macro events are excluded.
     """
+    if lookback_days <= 0:
+        raise ValueError("lookback_days must be positive")
     lookback_start = asked_at - timedelta(days=lookback_days)
 
     query = """
-        SELECT
-            se.event_id,
-            se.condition_id,
-            se.event_type,
-            se.payload,
-            se.event_time,
-            ms.end_date
+        SELECT se.condition_id
         FROM signal_events se
         INNER JOIN (
-            SELECT condition_id, end_date
+            SELECT condition_id, anyLast(end_date) AS end_date
             FROM markets_snapshots
             WHERE observed_at <= {asof:DateTime64(3)}
-            ORDER BY condition_id, observed_at DESC
-            LIMIT 1 BY condition_id
+            GROUP BY condition_id
         ) ms ON se.condition_id = ms.condition_id
         WHERE se.event_type IN {types:Array(String)}
           AND se.observed_at >= {start:DateTime64(3)}
@@ -237,7 +236,7 @@ async def check_phantom_edge_suppression(
           AND (toUnixTimestamp(ms.end_date) - toUnixTimestamp(se.event_time))
               BETWEEN 0 AND {window_s:Int64}
         ORDER BY se.event_time DESC
-        LIMIT 500
+        LIMIT 5000
     """
     try:
         result = await ch.query(
@@ -253,41 +252,28 @@ async def check_phantom_edge_suppression(
     except Exception:
         rows = []
 
-    suppressed = 0
-    not_suppressed_ids: list[str] = []
-    for row in rows:
-        event_id = str(row[0])
-        payload_raw = row[3]
-        payload: dict = {}
-        if isinstance(payload_raw, str):
-            try:
-                payload = json.loads(payload_raw)
-            except Exception:
-                payload = {}
-        elif isinstance(payload_raw, dict):
-            payload = payload_raw
-        if payload.get("resolution_risk_suppressed"):
-            suppressed += 1
-        else:
-            not_suppressed_ids.append(event_id)
-
     total = len(rows)
-    not_suppressed = total - suppressed
-    rate = suppressed / total if total > 0 else 1.0
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for row in rows:
+        cid = str(row[0])
+        if cid not in seen_set:
+            seen_set.add(cid)
+            seen.append(cid)
+            if len(seen) >= 5:
+                break
+
+    per_day = total / lookback_days
     return PhantomEdgeResult(
         alerts_in_final_hour=total,
-        alerts_suppressed=suppressed,
-        alerts_not_suppressed=not_suppressed,
-        suppression_rate=round(rate, 4),
-        sample_unsuppressed_ids=not_suppressed_ids[:5],
+        alerts_per_day=round(per_day, 4),
+        sample_condition_ids=seen,
     )
 
 
 # ---------------------------------------------------------------------------
 # 3. Last-hour FP retrospective
 # ---------------------------------------------------------------------------
-
-_FP_TARGET = 0.15
 
 
 async def run_eol_fp_retrospective(
@@ -301,8 +287,13 @@ async def run_eol_fp_retrospective(
     """Compute the empirical FP rate for alerts fired in the final hour.
 
     An alert is a *false positive* when the directional signal (``yes`` or
-    ``no``) disagrees with the actual binary resolution outcome.
+    ``no``) disagrees with the actual binary resolution outcome. The first
+    ``market_resolutions`` row per condition_id is the ground truth — UMA
+    re-resolutions arrive as new rows, but we use the first to keep the
+    audit aligned with the M6.1 PIT contract.
     """
+    if lookback_days <= 0:
+        raise ValueError("lookback_days must be positive")
     lookback_start = asked_at - timedelta(days=lookback_days)
 
     query = """
@@ -312,11 +303,10 @@ async def run_eol_fp_retrospective(
             mr.outcome
         FROM signal_events se
         INNER JOIN (
-            SELECT condition_id, end_date
+            SELECT condition_id, anyLast(end_date) AS end_date
             FROM markets_snapshots
             WHERE observed_at <= {asof:DateTime64(3)}
-            ORDER BY condition_id, observed_at DESC
-            LIMIT 1 BY condition_id
+            GROUP BY condition_id
         ) ms ON se.condition_id = ms.condition_id
         INNER JOIN (
             SELECT condition_id, outcome
@@ -333,7 +323,7 @@ async def run_eol_fp_retrospective(
               BETWEEN 0 AND {window_s:Int64}
           AND lower(mr.outcome) IN ('yes', 'no')
           AND lower(se.direction) IN ('yes', 'no')
-        LIMIT 2000
+        LIMIT 5000
     """
     try:
         result = await ch.query(
@@ -387,7 +377,7 @@ async def run_eol_monitor(
     as_of = asked_at or datetime.now(tz=UTC)
     ramp_up, phantom, fp_retro = await asyncio.gather(
         check_ramp_up_on_live_markets(ch, as_of),
-        check_phantom_edge_suppression(ch, as_of, lookback_days=lookback_days),
+        check_phantom_edge_density(ch, as_of, lookback_days=lookback_days),
         run_eol_fp_retrospective(ch, as_of, lookback_days=lookback_days),
     )
     return EolMonitorReport(

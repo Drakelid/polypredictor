@@ -232,7 +232,8 @@ async def test_run_once_writes_glassnode_and_dune(
             "/transactions/transfers_volume_to_exchanges_sum"
         ):
             assert request.url.params.get("a") == "BTC"
-            assert request.url.params.get("api_key") == "fake-gn-key"
+            assert "api_key" not in request.url.params
+            assert request.headers.get("X-API-KEY") == "fake-gn-key"
             return httpx.Response(200, json=GLASSNODE_INFLOW_PAYLOAD)
         if request.url.host == "api.dune.com" and request.url.path.endswith(
             "/query/4242/results"

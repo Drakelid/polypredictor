@@ -37,6 +37,7 @@ import httpx
 import structlog
 
 from ..clickhouse import get_async_client
+from ..provider_credentials import settings_with_stored_provider_credentials
 from ..settings import get_settings
 from ..writers import ONCHAIN_METRICS_COLS, onchain_metric_row, utcnow
 
@@ -120,8 +121,11 @@ def load_glassnode_config(path: str | None) -> list[GlassnodeMetricConfig]:
 def load_dune_config(path: str | None) -> list[DuneQueryConfig]:
     out: list[DuneQueryConfig] = []
     for entry in _load_entries(path):
+        raw_query_id = entry.get("query_id")
+        if raw_query_id is None:
+            continue
         try:
-            query_id = int(entry.get("query_id"))
+            query_id = int(raw_query_id)
         except (TypeError, ValueError):
             continue
         metric_id = str(entry.get("metric_id") or "").strip()
@@ -299,10 +303,10 @@ async def fetch_glassnode_metric(
     url = f"{base_url.rstrip('/')}/metrics/{config.metric}"
     response = await client.get(
         url,
+        headers={"X-API-KEY": api_key},
         params={
             "a": config.asset,
             "i": config.interval,
-            "api_key": api_key,
             "f": "JSON",
         },
     )
@@ -329,7 +333,7 @@ async def run_once(
     glassnode_configs: list[GlassnodeMetricConfig] | None = None,
     dune_configs: list[DuneQueryConfig] | None = None,
 ) -> int:
-    settings = get_settings()
+    settings = await settings_with_stored_provider_credentials(get_settings())
     if glassnode_configs is None:
         glassnode_configs = (
             load_glassnode_config(settings.onchain_metrics_glassnode_config_file)
@@ -389,11 +393,11 @@ async def run_once(
                         observed_at=observed_at,
                     )
                 )
-        for config in dune_configs:
+        for dune_config in dune_configs:
             try:
                 observations = await fetch_dune_query(
                     http_client,
-                    config,
+                    dune_config,
                     base_url=settings.dune_base,
                     api_key=settings.dune_api_key or "",
                 )
@@ -401,8 +405,8 @@ async def run_once(
                 log.warning(
                     "onchain_metrics.fetch_failed",
                     source="dune",
-                    metric=config.metric_id,
-                    query_id=config.query_id,
+                    metric=dune_config.metric_id,
+                    query_id=dune_config.query_id,
                     error=repr(exc),
                 )
                 continue

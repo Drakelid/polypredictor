@@ -130,10 +130,13 @@ async def load_resolved_market_corpus(
     result = await ch.query(
         f"""
         SELECT condition_id, resolved_outcome, dispute_status, event_time, observed_at
-        FROM market_resolutions
-        WHERE {' AND '.join(conditions)}
-        ORDER BY condition_id, observed_at ASC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, resolved_outcome, dispute_status, event_time, observed_at
+            FROM market_resolutions
+            WHERE {' AND '.join(conditions)}
+            ORDER BY condition_id, observed_at ASC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY event_time DESC
         LIMIT {{limit:UInt32}}
         """,

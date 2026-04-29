@@ -9,8 +9,7 @@ from urllib.parse import urlparse
 
 from asyncpg import Pool
 
-from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 KNOWN_SIGNAL_TYPES = (
     "whale_open",
@@ -55,8 +54,8 @@ class PushPreferencesInput:
     condition_ids: list[str]
 
 
-async def get_preferences(*, pool: Pool, settings: Settings) -> PushPreferences:
-    user_id = await ensure_demo_user(pool, settings)
+async def get_preferences(*, pool: Pool, email: str) -> PushPreferences:
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -70,7 +69,7 @@ async def get_preferences(*, pool: Pool, settings: Settings) -> PushPreferences:
     if row is None:
         return PushPreferences(
             email_enabled=False,
-            email_to=settings.journal_demo_user_email,
+            email_to=email,
             webhook_enabled=False,
             webhook_url=None,
             min_severity=1.0,
@@ -84,11 +83,11 @@ async def get_preferences(*, pool: Pool, settings: Settings) -> PushPreferences:
 async def update_preferences(
     *,
     pool: Pool,
-    settings: Settings,
+    email: str,
     payload: PushPreferencesInput,
 ) -> PushPreferences:
-    user_id = await ensure_demo_user(pool, settings)
-    normalized = _normalize_payload(payload, default_email=settings.journal_demo_user_email)
+    user_id = await ensure_user_by_email(pool, email=email)
+    normalized = _normalize_payload(payload, default_email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """

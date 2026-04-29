@@ -28,8 +28,8 @@ class _FakeManager:
 async def test_refresh_starts_manager_when_credentials_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_load_user_auth(*, pool, settings):
-        del pool, settings
+    async def fake_load_user_auth(*, pool, email, settings):
+        del pool, email, settings
         return UserAuth(api_key="key", secret="secret", passphrase="pass")
 
     monkeypatch.setattr(journal_autosync, "load_user_auth", fake_load_user_auth)
@@ -37,7 +37,14 @@ async def test_refresh_starts_manager_when_credentials_exist(
     service = journal_autosync.UserJournalAutoSyncService(
         pool=object(),  # type: ignore[arg-type]
         ch=object(),  # type: ignore[arg-type]
-        settings=type("Settings", (), {"polymarket_wss_base": "wss://example.com"})(),
+        settings=type(
+            "Settings",
+            (),
+            {
+                "polymarket_wss_base": "wss://example.com",
+                "journal_demo_user_email": "demo@polypredictor.local",
+            },
+        )(),
         manager_factory=_FakeManager,  # type: ignore[arg-type]
     )
 
@@ -54,8 +61,8 @@ async def test_refresh_without_credentials_stops_existing_manager(
 ) -> None:
     calls = {"count": 0}
 
-    async def fake_load_user_auth(*, pool, settings):
-        del pool, settings
+    async def fake_load_user_auth(*, pool, email, settings):
+        del pool, email, settings
         calls["count"] += 1
         return None
 
@@ -64,7 +71,14 @@ async def test_refresh_without_credentials_stops_existing_manager(
     service = journal_autosync.UserJournalAutoSyncService(
         pool=object(),  # type: ignore[arg-type]
         ch=object(),  # type: ignore[arg-type]
-        settings=type("Settings", (), {"polymarket_wss_base": "wss://example.com"})(),
+        settings=type(
+            "Settings",
+            (),
+            {
+                "polymarket_wss_base": "wss://example.com",
+                "journal_demo_user_email": "demo@polypredictor.local",
+            },
+        )(),
         manager_factory=_FakeManager,  # type: ignore[arg-type]
     )
     service._manager = _FakeManager()
@@ -82,12 +96,12 @@ async def test_handle_event_logs_fill_with_model_snapshot(
 ) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_load_user_auth(*, pool, settings):
-        del pool, settings
+    async def fake_load_user_auth(*, pool, email, settings):
+        del pool, email, settings
         return UserAuth(api_key="key", secret="secret", passphrase="pass")
 
-    async def fake_create_auto_fill_call(*, pool, ch, settings, payload, asked_at):
-        del pool, ch, settings
+    async def fake_create_auto_fill_call(*, pool, ch, email, settings, payload, asked_at):
+        del pool, ch, email, settings
         captured["payload"] = payload
         captured["asked_at"] = asked_at
         return None
@@ -98,7 +112,14 @@ async def test_handle_event_logs_fill_with_model_snapshot(
     service = journal_autosync.UserJournalAutoSyncService(
         pool=object(),  # type: ignore[arg-type]
         ch=object(),  # type: ignore[arg-type]
-        settings=type("Settings", (), {"polymarket_wss_base": "wss://example.com"})(),
+        settings=type(
+            "Settings",
+            (),
+            {
+                "polymarket_wss_base": "wss://example.com",
+                "journal_demo_user_email": "demo@polypredictor.local",
+            },
+        )(),
         manager_factory=_FakeManager,  # type: ignore[arg-type]
     )
 

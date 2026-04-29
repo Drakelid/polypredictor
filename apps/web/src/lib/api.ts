@@ -3,10 +3,30 @@
 // All historical reads MUST use the /asof endpoints (PRD §6.6 PIT correctness).
 // Live reads are the default for dashboard views.
 
-const BASE = process.env.NEXT_PUBLIC_API_BASE ?? process.env.API_BASE ?? "http://localhost:8000";
+function runtimeEnv(name: string): string | undefined {
+  return process.env[name];
+}
+
+function apiBase(): string {
+  if (typeof window === "undefined") {
+    return (
+      runtimeEnv("API_BASE") ??
+      runtimeEnv("NEXT_PUBLIC_API_BASE") ??
+      "http://localhost:8000"
+    );
+  }
+  return (
+    runtimeEnv("NEXT_PUBLIC_API_BASE") ??
+    runtimeEnv("API_BASE") ??
+    "http://localhost:8000"
+  );
+}
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { cache: "no-store" });
+  const res = await fetch(`${apiBase()}${path}`, {
+    cache: "no-store",
+    credentials: "include",
+  });
   if (!res.ok) {
     throw new Error(`API ${path} → ${res.status}`);
   }
@@ -14,9 +34,10 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     method: "POST",
     cache: "no-store",
+    credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -28,9 +49,10 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function putJson<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     method: "PUT",
     cache: "no-store",
+    credentials: "include",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -285,6 +307,29 @@ export type PolymarketClobCredentialStatus = {
   rotated_at: string | null;
 };
 
+export type ProviderCredentialField = {
+  name: string;
+  label: string;
+  secret: boolean;
+  required: boolean;
+  placeholder: string;
+};
+
+export type ProviderCredentialStatus = {
+  provider: string;
+  label: string;
+  description: string;
+  fields: ProviderCredentialField[];
+  configured: boolean;
+  configured_fields: string[];
+  created_at: string | null;
+  rotated_at: string | null;
+};
+
+export type ProviderCredentialsResponse = {
+  providers: ProviderCredentialStatus[];
+};
+
 export type SignalFeedOptions = {
   lookbackHours?: number;
   limit?: number;
@@ -389,6 +434,20 @@ export async function updatePolymarketClobCredentials(payload: {
   proxy_wallet: string | null;
 }): Promise<PolymarketClobCredentialStatus> {
   return putJson<PolymarketClobCredentialStatus>("/v1/polymarket-clob-credentials", payload);
+}
+
+export async function fetchProviderCredentials(): Promise<ProviderCredentialsResponse> {
+  return getJson<ProviderCredentialsResponse>("/v1/provider-credentials");
+}
+
+export async function updateProviderCredentials(payload: {
+  provider: string;
+  values: Record<string, string | null>;
+}): Promise<ProviderCredentialStatus> {
+  return putJson<ProviderCredentialStatus>(
+    `/v1/provider-credentials/${encodeURIComponent(payload.provider)}`,
+    { values: payload.values },
+  );
 }
 
 export type FeatureAttribution = {
@@ -836,17 +895,16 @@ export type EolMonitorReport = {
   lookback_days: number;
   ramp_up: {
     markets_checked: number;
-    markets_with_high_certainty: number;
-    markets_with_low_certainty: number;
-    high_certainty_rate: number;
+    markets_in_ramp: number;
+    markets_in_phantom_window: number;
+    mean_convergence_weight: number;
+    max_convergence_weight: number;
     sample_market_ids: string[];
   };
   phantom_edge: {
     alerts_in_final_hour: number;
-    alerts_suppressed: number;
-    alerts_not_suppressed: number;
-    suppression_rate: number;
-    sample_unsuppressed_ids: string[];
+    alerts_per_day: number;
+    sample_condition_ids: string[];
   };
   last_hour_fp: {
     alerts_classified: number;

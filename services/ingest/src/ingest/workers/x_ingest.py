@@ -42,6 +42,7 @@ import structlog
 from ..clickhouse import get_async_client
 from ..dlq import DeadLetterQueue
 from ..kol_loader import kol_categories_for_author, load_kol_index
+from ..provider_credentials import settings_with_stored_provider_credentials
 from ..settings import get_settings
 from ..writers import EXTERNAL_EVENTS_COLS, external_event_row, utcnow
 from .rss_ingest import (
@@ -413,7 +414,7 @@ async def _stream_forever(
 async def run_forever() -> None:
     """Entry point: start the filtered-stream worker."""
     logging.basicConfig(level=get_settings().log_level)
-    settings = get_settings()
+    settings = await settings_with_stored_provider_credentials(get_settings())
     bearer_token = settings.x_bearer_token
     if not bearer_token:
         log.info("x_ingest.no_bearer_token_configured_skip")

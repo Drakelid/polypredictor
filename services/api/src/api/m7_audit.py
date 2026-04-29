@@ -137,7 +137,7 @@ async def tuning_reproducibility_audit(
     tolerance: float = 1e-9,
 ) -> TuningReproducibilityAudit:
     settings = get_settings()
-    profile = await get_active_profile(pool=pool, settings=settings)
+    profile = await get_active_profile(pool=pool, email=settings.journal_demo_user_email)
     replay_rows, _, _ = await replay_walk_forward_samples(
         ch,
         horizons_hours=[horizon_hours],

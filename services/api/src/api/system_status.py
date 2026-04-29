@@ -86,11 +86,12 @@ def _source_component(
     if summary.failure_rate > max_failure_rate:
         state = "degraded"
         detail_parts.append(f"failure-rate guardrail {max_failure_rate:.2%} breached")
-    if summary.last_observed_at is None:
+    last_observed_at = _coerce_utc(summary.last_observed_at)
+    if last_observed_at is None:
         state = "unknown"
         detail_parts.append("no observations in window")
     else:
-        staleness = checked_at - summary.last_observed_at
+        staleness = _coerce_utc(checked_at) - last_observed_at
         if staleness > timedelta(minutes=max_staleness_minutes):
             state = "degraded"
             detail_parts.append(f"stale for {int(staleness.total_seconds() // 60)}m")
@@ -98,8 +99,12 @@ def _source_component(
         name=f"source:{summary.source}",
         state=state,
         detail=", ".join(detail_parts),
-        last_observed_at=summary.last_observed_at,
+        last_observed_at=last_observed_at,
     )
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _overall_state(components: list[StatusComponent]) -> ComponentState:

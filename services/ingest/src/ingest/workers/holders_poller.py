@@ -62,10 +62,13 @@ async def _active_markets(
 ) -> list[MarketTokens]:
     query = """
         SELECT condition_id, token_ids, active, closed, archived
-        FROM markets_snapshots
-        WHERE observed_at <= {asof:DateTime64(3)}
-        ORDER BY condition_id, observed_at DESC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, token_ids, active, closed, archived, volume_usdc
+            FROM markets_snapshots
+            WHERE observed_at <= {asof:DateTime64(3)}
+            ORDER BY condition_id, observed_at DESC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY volume_usdc DESC
         LIMIT {limit:UInt32}
     """

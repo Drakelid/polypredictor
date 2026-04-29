@@ -23,7 +23,7 @@ from asyncpg import Pool
 from polymarket_client import DataClient
 
 from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
@@ -65,10 +65,11 @@ class PolymarketAddressInput:
 async def get_linked_address(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
     data_client: DataClient | None = None,
 ) -> PolymarketAddressLink:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -104,11 +105,12 @@ async def get_linked_address(
 async def update_linked_address(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
     payload: PolymarketAddressInput,
     data_client: DataClient | None = None,
 ) -> PolymarketAddressLink:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     proxy_wallet = _normalize_proxy_wallet(payload.proxy_wallet)
     async with pool.acquire() as conn:
         if proxy_wallet is None:

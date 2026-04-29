@@ -38,9 +38,12 @@ async def latest_active_markets(ch: AsyncClient) -> list[dict[str, object]]:
     """Latest active market snapshot per condition id, ordered by volume."""
     query = """
         SELECT condition_id, token_ids, volume_usdc, active, closed, archived
-        FROM markets_snapshots
-        ORDER BY condition_id, observed_at DESC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, token_ids, volume_usdc, active, closed, archived
+            FROM markets_snapshots
+            ORDER BY condition_id, observed_at DESC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY volume_usdc DESC
     """
     result = await ch.query(query)

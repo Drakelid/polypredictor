@@ -117,10 +117,13 @@ async def latest_binary_resolutions(
     result = await ch.query(
         f"""
         SELECT condition_id, resolved_outcome, event_time
-        FROM market_resolutions
-        WHERE {' AND '.join(conditions)}
-        ORDER BY condition_id, observed_at ASC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, resolved_outcome, event_time
+            FROM market_resolutions
+            WHERE {' AND '.join(conditions)}
+            ORDER BY condition_id, observed_at ASC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY event_time DESC
         LIMIT {{limit:UInt32}}
         """,

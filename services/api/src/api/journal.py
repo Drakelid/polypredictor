@@ -14,7 +14,7 @@ from clickhouse_connect.driver.asyncclient import AsyncClient
 from . import asof as asof_q
 from .markets import MarketModelDetail, model_for_market
 from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 _CENT = Decimal("0.000001")
 
@@ -87,14 +87,16 @@ async def create_manual_call(
     *,
     pool: Pool,
     ch: AsyncClient,
+    email: str,
     settings: Settings,
     payload: CreateJournalCallInput,
     asked_at: datetime,
 ) -> JournalCall:
-    user_id = await ensure_demo_user(pool, settings)
+    del settings
+    user_id = await ensure_user_by_email(pool, email=email)
     from . import tuning as tuning_q
 
-    tuning_profile = await tuning_q.get_active_profile(pool=pool, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(pool=pool, email=email)
     detail = await model_for_market(
         ch,
         condition_id=payload.condition_id,
@@ -135,11 +137,13 @@ async def create_auto_fill_call(
     *,
     pool: Pool,
     ch: AsyncClient,
+    email: str,
     settings: Settings,
     payload: AutoJournalFillInput,
     asked_at: datetime,
 ) -> JournalCall | None:
-    user_id = await ensure_demo_user(pool, settings)
+    del settings
+    user_id = await ensure_user_by_email(pool, email=email)
     from . import tuning as tuning_q
 
     async with pool.acquire() as conn:
@@ -161,7 +165,7 @@ async def create_auto_fill_call(
     if existing is not None:
         return _journal_call_from_row(existing)
 
-    tuning_profile = await tuning_q.get_active_profile(pool=pool, settings=settings)
+    tuning_profile = await tuning_q.get_active_profile(pool=pool, email=email)
     detail = await model_for_market(
         ch,
         condition_id=payload.condition_id,
@@ -209,9 +213,11 @@ async def list_calls(
     *,
     pool: Pool,
     ch: AsyncClient,
+    email: str,
     settings: Settings,
 ) -> list[JournalCall]:
-    user_id = await ensure_demo_user(pool, settings)
+    del settings
+    user_id = await ensure_user_by_email(pool, email=email)
     await sync_resolutions(pool=pool, ch=ch, user_id=user_id)
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -233,9 +239,10 @@ async def summary(
     *,
     pool: Pool,
     ch: AsyncClient,
+    email: str,
     settings: Settings,
 ) -> JournalSummary:
-    calls = await list_calls(pool=pool, ch=ch, settings=settings)
+    calls = await list_calls(pool=pool, ch=ch, email=email, settings=settings)
     resolved = [call for call in calls if call.resolved_outcome in {"YES", "NO"}]
     avg_brier = (
         sum(call.brier_contribution or 0.0 for call in resolved) / len(resolved)
@@ -264,7 +271,9 @@ async def summary(
         for bucket in buckets
         if bucket["count"] > 0
     ]
-    resolution_sync = await _journal_resolution_sync(pool=pool, settings=settings)
+    resolution_sync = await _journal_resolution_sync(
+        pool=pool, email=email, settings=settings
+    )
     return JournalSummary(
         total_calls=len(calls),
         resolved_calls=len(resolved),
@@ -283,12 +292,15 @@ async def summary(
 async def _journal_resolution_sync(
     *,
     pool: Pool,
+    email: str,
     settings: Settings,
 ) -> JournalResolutionSync | None:
     # Local import avoids an otherwise unnecessary module dependency at import time.
     from . import polymarket_account as polymarket_account_q
 
-    link = await polymarket_account_q.get_linked_address(pool=pool, settings=settings)
+    link = await polymarket_account_q.get_linked_address(
+        pool=pool, email=email, settings=settings
+    )
     if link.summary is None:
         return None
     return JournalResolutionSync(

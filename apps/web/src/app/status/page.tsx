@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { fetchSystemStatus, type SystemStatus } from "@/lib/api";
+import { type SystemStatus } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
@@ -37,10 +37,26 @@ function componentLabel(name: string): string {
   return name;
 }
 
+function runtimeEnv(name: string): string | undefined {
+  return process.env[name];
+}
+
+async function fetchStatusFromServer(): Promise<SystemStatus> {
+  const base =
+    runtimeEnv("API_BASE") ??
+    runtimeEnv("NEXT_PUBLIC_API_BASE") ??
+    "http://localhost:8000";
+  const response = await fetch(`${base}/v1/status`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`status endpoint returned ${response.status}`);
+  }
+  return response.json() as Promise<SystemStatus>;
+}
+
 export default async function StatusPage() {
   let status: SystemStatus;
   try {
-    status = await fetchSystemStatus();
+    status = await fetchStatusFromServer();
   } catch {
     status = {
       state: "down",

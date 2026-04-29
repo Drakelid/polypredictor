@@ -43,16 +43,18 @@ class _FakePool:
 async def test_get_preferences_defaults_to_opt_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.privacy_prefs.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.privacy_prefs.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn(None))
 
     prefs = await get_preferences(
         pool=pool,  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
     )
 
     assert prefs.cross_user_learning_opt_in is False
@@ -65,11 +67,13 @@ async def test_update_preferences_persists_opt_in(
 ) -> None:
     now = datetime(2026, 4, 24, 12, tzinfo=UTC)
 
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.privacy_prefs.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.privacy_prefs.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn(
         {
             "cross_user_learning_opt_in": True,
@@ -80,7 +84,7 @@ async def test_update_preferences_persists_opt_in(
 
     prefs = await update_preferences(
         pool=pool,  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
         payload=PrivacyPreferencesInput(cross_user_learning_opt_in=True),
     )
 

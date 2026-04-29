@@ -23,7 +23,7 @@ public-facing endpoints. All results are PIT: every row filters
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from clickhouse_connect.driver.asyncclient import AsyncClient
 
@@ -56,6 +56,12 @@ def _safe_div(numerator: float, denominator: float) -> float:
     if denominator <= 0:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _coerce_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 async def source_health_summary_asof(
@@ -127,7 +133,11 @@ async def source_health_summary_asof(
                 p95_latency_ms=(
                     float(p95_latency) if p95_latency is not None else None
                 ),
-                last_observed_at=last_observed if isinstance(last_observed, datetime) else None,
+                last_observed_at=(
+                    _coerce_utc(last_observed)
+                    if isinstance(last_observed, datetime)
+                    else None
+                ),
             )
         )
     return summaries

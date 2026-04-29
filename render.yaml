@@ -48,6 +48,18 @@ services:
         sync: false
       - key: USER_SECRET_ENCRYPTION_KEY_B64
         generateValue: true
+      - key: AUTH_SESSION_SECRET_B64
+        generateValue: true
+      - key: AUTH_SESSION_COOKIE_SECURE
+        value: "true"
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
       - key: CME_API_ID
         sync: false
       - key: CME_API_SECRET
@@ -78,11 +90,31 @@ services:
     dockerfilePath: ./services/ingest/Dockerfile
     dockerContext: .
     dockerCommand: python -m ingest.workers.gamma_discovery
-    envVars:
+    envVars: &ingestEnv
       - key: APP_ENV
         value: staging
       - key: LOG_LEVEL
         value: INFO
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: polypredictor-postgres-staging
+          property: password
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -97,6 +129,18 @@ services:
       - key: CLICKHOUSE_USER
         sync: false
       - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: USER_SECRET_ENCRYPTION_KEY_B64
+        sync: false
+      - key: GLASSNODE_API_KEY
+        sync: false
+      - key: DUNE_API_KEY
+        sync: false
+      - key: X_BEARER_TOKEN
+        sync: false
+      - key: CME_API_ID
+        sync: false
+      - key: CME_API_SECRET
         sync: false
 
   - type: worker
@@ -106,26 +150,169 @@ services:
     dockerfilePath: ./services/ingest/Dockerfile
     dockerContext: .
     dockerCommand: python -m ingest.workers.clob_poller
-    envVars:
-      - key: APP_ENV
-        value: staging
-      - key: LOG_LEVEL
-        value: INFO
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: polypredictor-redis-staging
-          property: connectionString
-      - key: CLICKHOUSE_HOST
-        sync: false
-      - key: CLICKHOUSE_PORT
-        value: "8123"
-      - key: CLICKHOUSE_DB
-        value: polypredictor
-      - key: CLICKHOUSE_USER
-        sync: false
-      - key: CLICKHOUSE_PASSWORD
-        sync: false
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-features-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.feature_snapshots
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-smart-money-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.smart_money_refresh
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-arb-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.arb_checker
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-external-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.external_divergence
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-microstructure-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.microstructure_signals
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-rss-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.rss_ingest
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-reddit-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.reddit_ingest
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-x-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.x_ingest
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-scheduled-events-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.scheduled_events_ingest
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-deribit-iv-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.deribit_iv_surface
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-spot-validation-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.spot_price_validation
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-macro-series-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.macro_series_ingest
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-perp-funding-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.perp_funding_basis
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-onchain-metrics-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.onchain_metrics
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-holders-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.holders_poller
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-trades-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.trades_sweeper
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-prices-history-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.prices_history_backfill
+    envVars: *ingestEnv
+
+  - type: worker
+    name: polypredictor-ingest-regime-staging
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./services/ingest/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m ingest.workers.regime_tagger
+    envVars: *ingestEnv
 
   - type: keyvalue
     name: polypredictor-redis-staging

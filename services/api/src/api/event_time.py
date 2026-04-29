@@ -113,14 +113,24 @@ async def scheduled_events_asof(
             metadata,
             event_time,
             observed_at
-        FROM external_events
-        WHERE event_kind IN ('macro', 'onchain')
-          AND has(related_markets, {cond:String})
-          AND event_time >= {start:DateTime64(3)}
-          AND event_time <= {end:DateTime64(3)}
-          AND observed_at <= {asof:DateTime64(3)}
-        ORDER BY source, source_id, observed_at DESC
-        LIMIT 1 BY source, source_id
+        FROM (
+            SELECT
+                event_kind,
+                source,
+                source_id,
+                title,
+                metadata,
+                event_time,
+                observed_at
+            FROM external_events
+            WHERE event_kind IN ('macro', 'onchain')
+              AND has(related_markets, {cond:String})
+              AND event_time >= {start:DateTime64(3)}
+              AND event_time <= {end:DateTime64(3)}
+              AND observed_at <= {asof:DateTime64(3)}
+            ORDER BY source, source_id, observed_at DESC
+            LIMIT 1 BY source, source_id
+        )
         ORDER BY event_time ASC
     """
     result = await ch.query(

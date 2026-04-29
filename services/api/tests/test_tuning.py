@@ -51,16 +51,18 @@ class _FakePool:
 async def test_get_active_profile_defaults_to_balanced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.tuning.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.tuning.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn([None]))
 
     profile = await get_active_profile(
         pool=pool,  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
     )
 
     assert profile.preset == "balanced"
@@ -74,11 +76,13 @@ async def test_update_active_profile_persists_named_preset(
 ) -> None:
     now = datetime(2026, 4, 24, 12, tzinfo=UTC)
 
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.tuning.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.tuning.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn(
         [
             {
@@ -100,7 +104,7 @@ async def test_update_active_profile_persists_named_preset(
 
     profile = await update_active_profile(
         pool=pool,  # type: ignore[arg-type]
-        settings=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
         payload=TuningProfileInput(preset="conservative", log_odds_shifts={}),
     )
 

@@ -59,10 +59,13 @@ async def _latest_threshold_candidates(
 ) -> list[ThresholdCandidate]:
     market_query = """
         SELECT condition_id, question, token_ids, active, closed, archived
-        FROM markets_snapshots
-        WHERE observed_at <= {asof:DateTime64(3)}
-        ORDER BY condition_id, observed_at DESC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, question, token_ids, active, closed, archived
+            FROM markets_snapshots
+            WHERE observed_at <= {asof:DateTime64(3)}
+            ORDER BY condition_id, observed_at DESC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY condition_id
         LIMIT {limit:UInt32}
     """

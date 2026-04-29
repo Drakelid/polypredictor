@@ -149,7 +149,7 @@ async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch
         ),
     ]
 
-    async def fake_list_calls(*, pool, ch, settings):
+    async def fake_list_calls(*, pool, ch, email, settings):
         return calls
 
     async def fake_resolution_sync(**_: object) -> None:
@@ -158,7 +158,12 @@ async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr("api.journal.list_calls", fake_list_calls)
     monkeypatch.setattr("api.journal._journal_resolution_sync", fake_resolution_sync)
 
-    report = await summary(pool=object(), ch=object(), settings=object())  # type: ignore[arg-type]
+    report = await summary(
+        pool=object(),  # type: ignore[arg-type]
+        ch=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
+        settings=object(),  # type: ignore[arg-type]
+    )
 
     assert report.total_calls == 3
     assert report.resolved_calls == 2
@@ -174,11 +179,11 @@ async def test_summary_aggregates_resolved_calls(monkeypatch: pytest.MonkeyPatch
 async def test_summary_includes_resolution_sync_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_list_calls(*, pool, ch, settings):
+    async def fake_list_calls(*, pool, ch, email, settings):
         return []
 
-    async def fake_resolution_sync(*, pool, settings):
-        del pool, settings
+    async def fake_resolution_sync(*, pool, email, settings):
+        del pool, email, settings
         return JournalResolutionSync(
             proxy_wallet="0xabcdefabcdefabcdefabcdefabcdefabcdef1234",
             verified_at=datetime(2026, 4, 24, 12, tzinfo=UTC),
@@ -191,7 +196,12 @@ async def test_summary_includes_resolution_sync_snapshot(
     monkeypatch.setattr("api.journal.list_calls", fake_list_calls)
     monkeypatch.setattr("api.journal._journal_resolution_sync", fake_resolution_sync)
 
-    report = await summary(pool=object(), ch=object(), settings=object())  # type: ignore[arg-type]
+    report = await summary(
+        pool=object(),  # type: ignore[arg-type]
+        ch=object(),  # type: ignore[arg-type]
+        email="alice@example.com",
+        settings=object(),  # type: ignore[arg-type]
+    )
 
     assert report.resolution_sync is not None
     assert report.resolution_sync.redeemable_positions == 2

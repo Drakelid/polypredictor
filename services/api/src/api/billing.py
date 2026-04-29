@@ -33,13 +33,13 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
 import asyncpg
+
+from .settings import Settings
 
 log = logging.getLogger(__name__)
 
@@ -55,30 +55,6 @@ CREATE TABLE IF NOT EXISTS billing_subscriptions (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
-
-# ---------------------------------------------------------------------------
-# Settings helpers (read directly from env to avoid circular imports)
-# ---------------------------------------------------------------------------
-
-
-def _stripe_key() -> str | None:
-    return os.environ.get("STRIPE_SECRET_KEY")
-
-
-def _stripe_price_id() -> str | None:
-    return os.environ.get("STRIPE_PRICE_ID")
-
-
-def _stripe_webhook_secret() -> str | None:
-    return os.environ.get("STRIPE_WEBHOOK_SECRET")
-
-
-def _monthly_price_usd() -> float:
-    try:
-        return float(os.environ.get("BILLING_MONTHLY_PRICE_USD", "49.0"))
-    except ValueError:
-        return 49.0
-
 
 # ---------------------------------------------------------------------------
 # Data shapes
@@ -135,6 +111,7 @@ def _row_to_sub(row: asyncpg.Record) -> BillingSubscription:
 async def create_checkout_session(
     pool: asyncpg.Pool,
     *,
+    settings: Settings,
     email: str,
     success_url: str,
     cancel_url: str,
@@ -145,8 +122,8 @@ async def create_checkout_session(
     development and staging environments work without live credentials.
     """
     await _ensure_table(pool)
-    stripe_key = _stripe_key()
-    price_id = _stripe_price_id()
+    stripe_key = settings.stripe_secret_key
+    price_id = settings.stripe_price_id
 
     if stripe_key and price_id:
         return await _stripe_checkout(
@@ -243,12 +220,15 @@ def _verify_stripe_signature(
 async def handle_stripe_webhook(
     pool: asyncpg.Pool,
     *,
+    settings: Settings,
     payload_bytes: bytes,
     sig_header: str,
 ) -> str:
     """Process a Stripe webhook event and update subscription state."""
-    secret = _stripe_webhook_secret()
-    if secret and not _verify_stripe_signature(payload_bytes, sig_header, secret):
+    secret = (settings.stripe_webhook_secret or "").strip()
+    if not secret:
+        raise ValueError("STRIPE_WEBHOOK_SECRET must be configured")
+    if not _verify_stripe_signature(payload_bytes, sig_header, secret):
         raise ValueError("invalid Stripe webhook signature")
 
     try:

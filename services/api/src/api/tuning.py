@@ -15,8 +15,7 @@ from datetime import UTC, datetime
 
 from asyncpg import Pool
 
-from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 SUPPORTED_SHIFT_KEYS = (
     "smart_money",
@@ -96,9 +95,15 @@ class TuningAdjustment:
 async def get_active_profile(
     *,
     pool: Pool,
-    settings: Settings,
+    email: str,
 ) -> TuningProfile:
-    user_id = await ensure_demo_user(pool, settings)
+    """Return the active tuning profile for ``email``.
+
+    Server-side rendering paths (markets list, history, model, journal)
+    that don't yet have an authenticated user pass the demo email; once
+    those routes get gated, the authenticated email flows through here.
+    """
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -131,10 +136,10 @@ async def get_active_profile(
 async def update_active_profile(
     *,
     pool: Pool,
-    settings: Settings,
+    email: str,
     payload: TuningProfileInput,
 ) -> TuningProfile:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     shifts = _resolve_input_shifts(payload)
     preset = _match_preset(shifts) or "custom"
     name = PRESET_LABELS[preset]

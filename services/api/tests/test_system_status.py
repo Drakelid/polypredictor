@@ -90,6 +90,29 @@ def test_source_component_degrades_when_stale() -> None:
     assert "stale" in component.detail
 
 
+def test_source_component_accepts_naive_last_observed_at() -> None:
+    checked_at = datetime(2026, 4, 25, 12, tzinfo=UTC)
+    component = _source_component(
+        SourceHealthSummary(
+            source="rss",
+            total_requests=100,
+            ok_count=100,
+            error_count=0,
+            rate_limited_count=0,
+            timeout_count=0,
+            failure_rate=0,
+            rate_limited_rate=0,
+            p50_latency_ms=100,
+            p95_latency_ms=300,
+            last_observed_at=datetime(2026, 4, 25, 11, 58),
+        ),
+        checked_at=checked_at,
+        max_failure_rate=0.01,
+        max_staleness_minutes=30,
+    )
+    assert component.state == "operational"
+
+
 @pytest.mark.asyncio
 async def test_build_system_status_operational_without_source_rows() -> None:
     status = await build_system_status(

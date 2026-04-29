@@ -17,6 +17,28 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     log_level: str = "INFO"
+    cors_allow_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    auth_session_secret_b64: str | None = None
+    auth_session_cookie_name: str = "polypredictor_session"
+    auth_session_ttl_seconds: int = 60 * 60 * 24 * 30
+    auth_session_cookie_secure: bool = False
+    # When True, /v1/auth/request-magic-link returns the token in the
+    # response body. Should ONLY be true in local development. Staging /
+    # production must keep this false; tokens leave via email (or, while
+    # the mailer is being wired, via structured logs the operator owns).
+    auth_magic_link_in_band: bool = False
+    # Master switch for per-route auth enforcement on user-scoped routes.
+    # When False, ungated routes still resolve to the demo user so the
+    # dashboard keeps working before the magic-link login UI ships. Flip to
+    # True once the frontend can drive a session.
+    auth_enforce_user_routes: bool = False
+    admin_emails: str = ""
+    error_reports_max_body_bytes: int = 64 * 1024
+    error_reports_rate_limit_per_minute: int = 30
+    # Drop a repeated error report within this window if its stack hash
+    # matches one already seen — keeps a single noisy bug from filling the
+    # `error_reports` table.
+    error_reports_dedupe_window_seconds: int = 3600
 
     postgres_host: str = "localhost"
     postgres_port: int = 5432
@@ -137,6 +159,15 @@ class Settings(BaseSettings):
     nfp_consensus_stddev: float | None = None
     # Continuous market distribution output (Open Q decision).
     distribution_n_points: int = 25
+    # Boot-time Postgres migration runner. Default path works in docker
+    # (services/ingest is copied into /app) and locally (relative to repo).
+    postgres_migrations_dir: str = "services/ingest/migrations/postgres"
+    postgres_migrations_apply_on_startup: bool = True
+    # Boot-time ClickHouse migration runner. Same volume-staleness problem
+    # as Postgres: clickhouse-server only runs /docker-entrypoint-initdb.d
+    # scripts on first init, so the api closes the gap defensively.
+    clickhouse_migrations_dir: str = "services/ingest/migrations/clickhouse"
+    clickhouse_migrations_apply_on_startup: bool = True
 
     @property
     def postgres_dsn(self) -> str:

@@ -40,10 +40,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
 
 from .types import HeadlineType
-
 
 # ---------------------------------------------------------------------------
 # Weight configuration
@@ -52,8 +50,8 @@ from .types import HeadlineType
 #: Per-category keyword pattern → score weight.
 #: Each entry is ``(regex_pattern, weight)``.  Patterns are compiled
 #: case-insensitively and matched against the *lowercased* headline.
-HEADLINE_FEATURE_WEIGHTS: Dict[
-    HeadlineType, List[Tuple[str, float]]
+HEADLINE_FEATURE_WEIGHTS: dict[
+    HeadlineType, list[tuple[str, float]]
 ] = {
     HeadlineType.BREAKING: [
         (r"\bbreaking\b", 2.5),
@@ -119,7 +117,7 @@ HEADLINE_FEATURE_WEIGHTS: Dict[
 }
 
 #: Category priority for tie-breaking (lower index = higher priority).
-_CATEGORY_PRIORITY: List[HeadlineType] = [
+_CATEGORY_PRIORITY: list[HeadlineType] = [
     HeadlineType.BREAKING,
     HeadlineType.DEV_UPDATE,
     HeadlineType.RUMOR,
@@ -151,11 +149,11 @@ _NEGATION_PATTERNS = [
 _NEGATION_WINDOW = 30  # characters on either side of a match to check
 
 # Pre-compile everything once at import time.
-_COMPILED_WEIGHTS: Dict[HeadlineType, List[Tuple[re.Pattern[str], float]]] = {
+_COMPILED_WEIGHTS: dict[HeadlineType, list[tuple[re.Pattern[str], float]]] = {
     cat: [(re.compile(pat, re.IGNORECASE), w) for pat, w in patterns]
     for cat, patterns in HEADLINE_FEATURE_WEIGHTS.items()
 }
-_COMPILED_NEGATIONS: List[re.Pattern[str]] = [
+_COMPILED_NEGATIONS: list[re.Pattern[str]] = [
     re.compile(p, re.IGNORECASE) for p in _NEGATION_PATTERNS
 ]
 
@@ -183,7 +181,7 @@ class HeadlineClassificationResult:
 
     headline_type: HeadlineType
     confidence: float
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -191,18 +189,17 @@ class HeadlineClassificationResult:
 # ---------------------------------------------------------------------------
 
 
-def _style_boosts(text_lower: str) -> Dict[HeadlineType, float]:
+def _style_boosts(text: str) -> dict[HeadlineType, float]:
     """Return per-category style bonuses based on punctuation / casing.
 
     These are *additive* — they layer on top of keyword hits.
     """
-    original_upper = text_lower.isupper()
-    boosts: Dict[HeadlineType, float] = {cat: 0.0 for cat in HeadlineType}
-    if original_upper:
+    boosts: dict[HeadlineType, float] = {cat: 0.0 for cat in HeadlineType}
+    if text.isupper():
         boosts[HeadlineType.BREAKING] += 2.0
-    if text_lower.endswith("?"):
+    if text.endswith("?"):
         boosts[HeadlineType.RUMOR] += 1.0
-    excl_count = text_lower.count("!")
+    excl_count = text.count("!")
     if excl_count >= 2:
         boosts[HeadlineType.BREAKING] += 1.0 + 0.3 * (excl_count - 2)
     return boosts
@@ -220,10 +217,10 @@ def _keyword_score(
     text: str,
     text_lower: str,
     category: HeadlineType,
-) -> Tuple[float, List[str]]:
+) -> tuple[float, list[str]]:
     """Compute the raw keyword score for a single category."""
     score = 0.0
-    reasons: List[str] = []
+    reasons: list[str] = []
     first_tokens = " ".join(text_lower.split()[:6])
     patterns = _COMPILED_WEIGHTS.get(category, [])
     for pattern, weight in patterns:
@@ -244,7 +241,7 @@ def _keyword_score(
 
 def _normalise_confidence(
     winner_score: float,
-    scores: Dict[HeadlineType, float],
+    scores: dict[HeadlineType, float],
     *,
     ambiguous: bool,
 ) -> float:
@@ -256,6 +253,9 @@ def _normalise_confidence(
     if ambiguous:
         # Penalise when the margin over second-best is slim.
         raw *= 0.75
+    # A discounted or otherwise weak single signal should not become
+    # overconfident just because no competing category fired.
+    raw *= winner_score / (winner_score + 0.75)
     # Clamp to [0.25, 0.97]
     return max(0.25, min(0.97, raw))
 
@@ -298,13 +298,13 @@ def classify_headline(headline: str) -> HeadlineClassificationResult:
     """
     text = headline.strip()
     text_lower = text.lower()
-    all_reasons: List[str] = []
+    all_reasons: list[str] = []
 
     # 1. Style boosts
-    style = _style_boosts(text_lower)
+    style = _style_boosts(text)
 
     # 2+3+4. Keyword scoring per category
-    scores: Dict[HeadlineType, float] = {cat: 0.0 for cat in HeadlineType}
+    scores: dict[HeadlineType, float] = {cat: 0.0 for cat in HeadlineType}
     for cat in HeadlineType:
         kw_score, kw_reasons = _keyword_score(text, text_lower, cat)
         scores[cat] = kw_score + style.get(cat, 0.0)

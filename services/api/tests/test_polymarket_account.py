@@ -108,11 +108,13 @@ async def test_fetch_public_account_summary_aggregates_public_surfaces() -> None
 async def test_get_linked_address_returns_summary_for_existing_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.polymarket_account.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.polymarket_account.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn(
         [
             {
@@ -125,6 +127,7 @@ async def test_get_linked_address_returns_summary_for_existing_row(
 
     link = await get_linked_address(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=type("Settings", (), {"polymarket_data_base": "https://example.com"})(),
         data_client=_FakeDataClient(),  # type: ignore[arg-type]
     )
@@ -138,11 +141,13 @@ async def test_get_linked_address_returns_summary_for_existing_row(
 async def test_update_linked_address_persists_verified_wallet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.polymarket_account.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.polymarket_account.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn(
         [
             {
@@ -155,6 +160,7 @@ async def test_update_linked_address_persists_verified_wallet(
 
     link = await update_linked_address(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=type("Settings", (), {"polymarket_data_base": "https://example.com"})(),
         payload=PolymarketAddressInput(
             proxy_wallet="0xABCDEFabcdefABCDEFabcdefABCDEFabcdef1234"
@@ -172,16 +178,19 @@ async def test_update_linked_address_persists_verified_wallet(
 async def test_update_linked_address_clears_saved_wallet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.polymarket_account.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.polymarket_account.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn([])
     pool = _FakePool(conn)
 
     link = await update_linked_address(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=type("Settings", (), {"polymarket_data_base": "https://example.com"})(),
         payload=PolymarketAddressInput(proxy_wallet=None),
     )

@@ -89,15 +89,18 @@ def _settings_with_key() -> object:
 async def test_get_credential_status_defaults_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.clob_credentials.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.clob_credentials.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn())
 
     status = await get_credential_status(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=_settings_with_key(),  # type: ignore[arg-type]
     )
 
@@ -109,17 +112,20 @@ async def test_get_credential_status_defaults_unconfigured(
 async def test_update_credentials_encrypts_and_loads_roundtrip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.clob_credentials.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.clob_credentials.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn()
     pool = _FakePool(conn)
     settings = _settings_with_key()
 
     status = await update_credentials(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=settings,  # type: ignore[arg-type]
         payload=ClobCredentialInput(
             api_key="api-key",
@@ -130,6 +136,7 @@ async def test_update_credentials_encrypts_and_loads_roundtrip(
     )
     auth = await load_user_auth(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=settings,  # type: ignore[arg-type]
     )
 
@@ -144,20 +151,64 @@ async def test_update_credentials_encrypts_and_loads_roundtrip(
 
 
 @pytest.mark.asyncio
-async def test_update_credentials_requires_encryption_key(
+async def test_update_credentials_requires_encryption_key_in_development(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.clob_credentials.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.clob_credentials.ensure_user_by_email", fake_ensure_user_by_email
+    )
+    conn = _FakeConn()
+    pool = _FakePool(conn)
+
+    with pytest.raises(ValueError, match="USER_SECRET_ENCRYPTION_KEY_B64"):
+        await update_credentials(
+            pool=pool,  # type: ignore[arg-type]
+            email="alice@example.com",
+            settings=type(
+                "Settings",
+                (),
+                {
+                    "app_env": "development",
+                    "user_secret_encryption_key_b64": None,
+                },
+            )(),  # type: ignore[arg-type]
+            payload=ClobCredentialInput(
+                api_key="api-key",
+                api_secret="api-secret",
+                passphrase="passphrase",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_credentials_requires_encryption_key_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
+        return "user-1"
+
+    monkeypatch.setattr(
+        "api.clob_credentials.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn())
 
     with pytest.raises(ValueError, match="USER_SECRET_ENCRYPTION_KEY_B64"):
         await update_credentials(
             pool=pool,  # type: ignore[arg-type]
-            settings=type("Settings", (), {"user_secret_encryption_key_b64": None})(),  # type: ignore[arg-type]
+            email="alice@example.com",
+            settings=type(
+                "Settings",
+                (),
+                {
+                    "app_env": "production",
+                    "user_secret_encryption_key_b64": None,
+                },
+            )(),  # type: ignore[arg-type]
             payload=ClobCredentialInput(
                 api_key="api-key",
                 api_secret="api-secret",
@@ -170,17 +221,20 @@ async def test_update_credentials_requires_encryption_key(
 async def test_update_credentials_clear_deletes_saved_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
-        del pool, settings
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.clob_credentials.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.clob_credentials.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn()
     pool = _FakePool(conn)
     settings = _settings_with_key()
 
     await update_credentials(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=settings,  # type: ignore[arg-type]
         payload=ClobCredentialInput(
             api_key="api-key",
@@ -191,6 +245,7 @@ async def test_update_credentials_clear_deletes_saved_row(
     )
     cleared = await update_credentials(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=settings,  # type: ignore[arg-type]
         payload=ClobCredentialInput(
             api_key=None,
@@ -201,6 +256,7 @@ async def test_update_credentials_clear_deletes_saved_row(
     )
     auth = await load_user_auth(
         pool=pool,  # type: ignore[arg-type]
+        email="alice@example.com",
         settings=settings,  # type: ignore[arg-type]
     )
 

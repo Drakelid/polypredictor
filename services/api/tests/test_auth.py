@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from api import auth
+from api.settings import Settings
 
 
 @dataclass
@@ -153,3 +154,173 @@ async def test_two_concurrent_verifications_only_one_succeeds() -> None:
     assert first.email == "alice@example.com"
     with pytest.raises(ValueError):
         await auth.verify_magic_link_token(pool=pool, token=issued.token)
+
+
+def test_session_token_round_trips_with_configured_secret() -> None:
+    settings = Settings(
+        auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+    )
+    token = auth.create_session_token(email="Alice@Example.com", settings=settings)
+
+    assert auth.verify_session_token(token, settings=settings) == "alice@example.com"
+
+
+def test_session_token_rejects_tampering() -> None:
+    settings = Settings(
+        auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+    )
+    token = auth.create_session_token(email="alice@example.com", settings=settings)
+    payload, signature = token.split(".", 1)
+
+    with pytest.raises(ValueError, match="invalid session token"):
+        auth.verify_session_token(f"{payload}x.{signature}", settings=settings)
+
+
+# ---------------------------------------------------------------------------
+# /v1/auth/request-magic-link in-band token gate
+# ---------------------------------------------------------------------------
+
+
+def _client_with_pool(pool: _FakePool) -> Any:
+    """Build a TestClient against the real app with the auth pool overridden."""
+    from api.main import app  # imported here so module-level tests don't require it
+
+    app.dependency_overrides[auth.get_pool_dependency] = lambda: pool
+    return app
+
+
+def test_request_magic_link_omits_token_when_in_band_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    pool = _FakePool()
+    app = _client_with_pool(pool)
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: Settings(auth_magic_link_in_band=False),
+    )
+    try:
+        client = TestClient(app)
+        resp = client.post("/v1/auth/request-magic-link", json={"email": "alice@example.com"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["message"] == "Magic link generated"
+        assert body["token"] is None
+        # The token must still have been persisted server-side so a mailer
+        # (or the operator reading the log) can deliver it out of band.
+        assert len(pool.rows) == 1
+    finally:
+        app.dependency_overrides.pop(auth.get_pool_dependency, None)
+
+
+def test_request_magic_link_returns_token_when_in_band_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    pool = _FakePool()
+    app = _client_with_pool(pool)
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: Settings(auth_magic_link_in_band=True),
+    )
+    try:
+        client = TestClient(app)
+        resp = client.post("/v1/auth/request-magic-link", json={"email": "alice@example.com"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["token"] is not None
+        assert body["token"] in pool.rows
+    finally:
+        app.dependency_overrides.pop(auth.get_pool_dependency, None)
+
+
+# ---------------------------------------------------------------------------
+# current_user_email_or_demo (soft auth gate, A foundation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _FakeRequest:
+    cookies: dict[str, str] = field(default_factory=dict)
+
+
+@pytest.mark.asyncio
+async def test_or_demo_returns_demo_when_no_cookie_and_enforce_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: Settings(
+            auth_enforce_user_routes=False,
+            journal_demo_user_email="DEMO@PolyPredictor.local",
+        ),
+    )
+    email = await auth.current_user_email_or_demo(_FakeRequest())  # type: ignore[arg-type]
+    assert email == "demo@polypredictor.local"
+
+
+@pytest.mark.asyncio
+async def test_or_demo_raises_when_no_cookie_and_enforce_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        auth,
+        "get_settings",
+        lambda: Settings(
+            auth_enforce_user_routes=True,
+            auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+        ),
+    )
+    with pytest.raises(Exception) as exc_info:
+        await auth.current_user_email_or_demo(_FakeRequest())  # type: ignore[arg-type]
+    assert "401" in str(exc_info.value) or "not authenticated" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_or_demo_honors_valid_cookie_even_when_enforce_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        auth_enforce_user_routes=False,
+        auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+    )
+    monkeypatch.setattr(auth, "get_settings", lambda: settings)
+    token = auth.create_session_token(email="alice@example.com", settings=settings)
+    request = _FakeRequest(cookies={settings.auth_session_cookie_name: token})
+    email = await auth.current_user_email_or_demo(request)  # type: ignore[arg-type]
+    assert email == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_or_demo_falls_through_on_bad_cookie_when_enforce_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        auth_enforce_user_routes=False,
+        auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+        journal_demo_user_email="demo@polypredictor.local",
+    )
+    monkeypatch.setattr(auth, "get_settings", lambda: settings)
+    request = _FakeRequest(cookies={settings.auth_session_cookie_name: "garbage.token"})
+    email = await auth.current_user_email_or_demo(request)  # type: ignore[arg-type]
+    assert email == "demo@polypredictor.local"
+
+
+@pytest.mark.asyncio
+async def test_or_demo_raises_on_bad_cookie_when_enforce_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        auth_enforce_user_routes=True,
+        auth_session_secret_b64="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY",
+    )
+    monkeypatch.setattr(auth, "get_settings", lambda: settings)
+    request = _FakeRequest(cookies={settings.auth_session_cookie_name: "garbage.token"})
+    with pytest.raises(Exception) as exc_info:
+        await auth.current_user_email_or_demo(request)  # type: ignore[arg-type]
+    assert "401" in str(exc_info.value) or "invalid session token" in str(exc_info.value)

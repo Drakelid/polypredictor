@@ -8,8 +8,7 @@ from typing import Any
 
 from asyncpg import Pool
 
-from .settings import Settings
-from .users import ensure_demo_user
+from .users import ensure_user_by_email
 
 
 @dataclass(frozen=True)
@@ -23,8 +22,8 @@ class PrivacyPreferencesInput:
     cross_user_learning_opt_in: bool
 
 
-async def get_preferences(*, pool: Pool, settings: Settings) -> PrivacyPreferences:
-    user_id = await ensure_demo_user(pool, settings)
+async def get_preferences(*, pool: Pool, email: str) -> PrivacyPreferences:
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -45,10 +44,10 @@ async def get_preferences(*, pool: Pool, settings: Settings) -> PrivacyPreferenc
 async def update_preferences(
     *,
     pool: Pool,
-    settings: Settings,
+    email: str,
     payload: PrivacyPreferencesInput,
 ) -> PrivacyPreferences:
-    user_id = await ensure_demo_user(pool, settings)
+    user_id = await ensure_user_by_email(pool, email=email)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """

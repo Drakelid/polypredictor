@@ -77,8 +77,8 @@ async def test_tuning_reproducibility_audit_detects_parity(
         )
     ]
 
-    async def fake_get_active_profile(*, pool, settings):
-        del pool, settings
+    async def fake_get_active_profile(*, pool, email):
+        del pool, email
         return type("Profile", (), {"name": "Balanced", "preset": "balanced"})()
 
     async def fake_replay_walk_forward_samples(
@@ -146,8 +146,8 @@ async def test_tuning_reproducibility_audit_detects_mismatch(
         )
     ]
 
-    async def fake_get_active_profile(*, pool, settings):
-        del pool, settings
+    async def fake_get_active_profile(*, pool, email):
+        del pool, email
         return type("Profile", (), {"name": "Balanced", "preset": "balanced"})()
 
     async def fake_replay_walk_forward_samples(

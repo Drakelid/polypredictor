@@ -14,9 +14,10 @@ Schema (Postgres)
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
     );
 
-The ``user_id`` is the same demo user identifier used elsewhere in the
-system (``settings.journal_demo_user_email``).  When multi-user auth is
-introduced this column becomes a FK to the users table.
+The ``user_id`` column is the user's email (TEXT) — same shape as the
+demo user identifier used elsewhere in the system. When the codebase
+converges on FK-to-``users``, this column flips to a UUID; the public
+function signatures already key on ``email`` so the swap is local.
 """
 
 from __future__ import annotations
@@ -34,14 +35,19 @@ CREATE TABLE IF NOT EXISTS user_paper_trading (
 );
 """
 
-_DEFAULT_USER_ID = "demo"
-
 
 @dataclass(frozen=True)
 class PaperTradingStatus:
-    user_id: str
+    email: str
     enabled: bool
     updated_at: datetime | None
+
+
+def _normalize_email(email: str) -> str:
+    cleaned = (email or "").strip().lower()
+    if not cleaned or "@" not in cleaned:
+        raise ValueError("email is required")
+    return cleaned
 
 
 async def _ensure_table(pool: asyncpg.Pool) -> None:
@@ -50,19 +56,20 @@ async def _ensure_table(pool: asyncpg.Pool) -> None:
 
 
 async def get_paper_trading_status(
-    pool: asyncpg.Pool, *, user_id: str = _DEFAULT_USER_ID
+    pool: asyncpg.Pool, *, email: str
 ) -> PaperTradingStatus:
-    """Return the current paper-trading flag for ``user_id``."""
+    """Return the current paper-trading flag for ``email``."""
+    cleaned = _normalize_email(email)
     await _ensure_table(pool)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT enabled, updated_at FROM user_paper_trading WHERE user_id = $1",
-            user_id,
+            cleaned,
         )
     if row is None:
-        return PaperTradingStatus(user_id=user_id, enabled=False, updated_at=None)
+        return PaperTradingStatus(email=cleaned, enabled=False, updated_at=None)
     return PaperTradingStatus(
-        user_id=user_id,
+        email=cleaned,
         enabled=bool(row["enabled"]),
         updated_at=row["updated_at"],
     )
@@ -71,10 +78,11 @@ async def get_paper_trading_status(
 async def set_paper_trading(
     pool: asyncpg.Pool,
     *,
-    user_id: str = _DEFAULT_USER_ID,
+    email: str,
     enabled: bool,
 ) -> PaperTradingStatus:
-    """Enable or disable paper trading for ``user_id``."""
+    """Enable or disable paper trading for ``email``."""
+    cleaned = _normalize_email(email)
     await _ensure_table(pool)
     async with pool.acquire() as conn:
         await conn.execute(
@@ -85,15 +93,16 @@ async def set_paper_trading(
                 SET enabled    = EXCLUDED.enabled,
                     updated_at = now()
             """,
-            user_id,
+            cleaned,
             enabled,
         )
         row = await conn.fetchrow(
             "SELECT enabled, updated_at FROM user_paper_trading WHERE user_id = $1",
-            user_id,
+            cleaned,
         )
+    assert row is not None
     return PaperTradingStatus(
-        user_id=user_id,
-        enabled=bool(row["enabled"]),  # type: ignore[index]
-        updated_at=row["updated_at"],  # type: ignore[index]
+        email=cleaned,
+        enabled=bool(row["enabled"]),
+        updated_at=row["updated_at"],
     )

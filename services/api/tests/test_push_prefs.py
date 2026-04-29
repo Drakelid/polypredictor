@@ -63,14 +63,17 @@ def test_normalize_condition_ids_dedupes_and_sorts() -> None:
 async def test_get_preferences_returns_default_when_row_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.push_prefs.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.push_prefs.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn(None))
-    settings = type("Settings", (), {"journal_demo_user_email": "demo@local"})()
+    email = "demo@local"
 
-    prefs = await get_preferences(pool=pool, settings=settings)  # type: ignore[arg-type]
+    prefs = await get_preferences(pool=pool, email=email)  # type: ignore[arg-type]
 
     assert prefs.email_enabled is False
     assert prefs.email_to == "demo@local"
@@ -85,10 +88,13 @@ async def test_update_preferences_normalizes_and_persists(
 ) -> None:
     now = datetime(2026, 4, 23, 12, tzinfo=UTC)
 
-    async def fake_ensure_demo_user(pool, settings):
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.push_prefs.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.push_prefs.ensure_user_by_email", fake_ensure_user_by_email
+    )
     conn = _FakeConn(
         {
             "email_enabled": True,
@@ -102,11 +108,11 @@ async def test_update_preferences_normalizes_and_persists(
         }
     )
     pool = _FakePool(conn)
-    settings = type("Settings", (), {"journal_demo_user_email": "demo@local"})()
+    email = "demo@local"
 
     prefs = await update_preferences(
         pool=pool,  # type: ignore[arg-type]
-        settings=settings,  # type: ignore[arg-type]
+        email=email,
         payload=PushPreferencesInput(
             email_enabled=True,
             email_to="alerts@example.com",
@@ -129,17 +135,20 @@ async def test_update_preferences_normalizes_and_persists(
 async def test_update_preferences_rejects_bad_webhook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_ensure_demo_user(pool, settings):
+    async def fake_ensure_user_by_email(pool, *, email, display_name=None):
+        del pool, email, display_name
         return "user-1"
 
-    monkeypatch.setattr("api.push_prefs.ensure_demo_user", fake_ensure_demo_user)
+    monkeypatch.setattr(
+        "api.push_prefs.ensure_user_by_email", fake_ensure_user_by_email
+    )
     pool = _FakePool(_FakeConn(None))
-    settings = type("Settings", (), {"journal_demo_user_email": "demo@local"})()
+    email = "demo@local"
 
     with pytest.raises(ValueError, match="webhook_url"):
         await update_preferences(
             pool=pool,  # type: ignore[arg-type]
-            settings=settings,  # type: ignore[arg-type]
+            email=email,
             payload=PushPreferencesInput(
                 email_enabled=False,
                 email_to=None,

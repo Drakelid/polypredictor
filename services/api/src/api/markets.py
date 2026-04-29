@@ -40,6 +40,7 @@ from model import (
 )
 
 from . import asof as asof_q
+from . import eol_convergence as eol_q
 from . import model_status
 from .adversarial_flow import (
     AdversarialFlowContext,
@@ -128,6 +129,11 @@ class MarketListRow:
     adversarial_flow_score: float | None
     adversarial_flow_flagged: bool
     thin_book: bool
+    # M8.3 EOL convergence (PRD §6.8): non-zero weight in the final 5% of a
+    # market's life; ``eol_phantom_suppressed`` is True in the final hour and
+    # forces ``edge_bps`` to None to suppress phantom last-hour alerts.
+    eol_convergence_weight: float | None = None
+    eol_phantom_suppressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,17 +239,24 @@ async def _latest_markets(
 ) -> list[dict[str, object]]:
     """Latest snapshot per ``condition_id`` ordered by volume.
 
-    ``LIMIT 1 BY condition_id`` keeps the one freshest row per market without
-    a window-function or subquery — ClickHouse-native and cheap.
+    Two-step query because ClickHouse 24.x rejects two top-level
+    ``ORDER BY`` clauses around ``LIMIT 1 BY``: the inner subquery picks
+    the freshest row per market via ``LIMIT 1 BY``, then the outer query
+    re-orders that deduped set by ``volume_usdc``.
     """
     query = """
         SELECT condition_id, event_id, question, slug, category, tags, volume_usdc,
                liquidity_usdc, end_date, token_ids, active, closed, archived,
                observed_at
-        FROM markets_snapshots
-        WHERE observed_at <= {asof:DateTime64(3)}
-        ORDER BY condition_id, observed_at DESC
-        LIMIT 1 BY condition_id
+        FROM (
+            SELECT condition_id, event_id, question, slug, category, tags, volume_usdc,
+                   liquidity_usdc, end_date, token_ids, active, closed, archived,
+                   observed_at
+            FROM markets_snapshots
+            WHERE observed_at <= {asof:DateTime64(3)}
+            ORDER BY condition_id, observed_at DESC
+            LIMIT 1 BY condition_id
+        )
         ORDER BY volume_usdc DESC
         LIMIT {limit:UInt32}
     """
@@ -670,6 +683,86 @@ def _time_to_resolution_s(end_date: datetime | None, asked_at: datetime) -> floa
     return (end_date - asked_at).total_seconds()
 
 
+def _total_life_s(
+    end_date: datetime | None, first_observed_at: datetime | None
+) -> float | None:
+    """Total observed life of a market: ``end_date`` minus first ``observed_at``.
+
+    ``first_observed_at`` is the earliest snapshot we ever ingested for the
+    market (cheap ``MIN(observed_at)`` per condition_id). Returns None when
+    either input is absent or non-positive — the caller falls back to no
+    convergence ramp in that case.
+    """
+    if end_date is None or first_observed_at is None:
+        return None
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=UTC)
+    if first_observed_at.tzinfo is None:
+        first_observed_at = first_observed_at.replace(tzinfo=UTC)
+    delta = (end_date - first_observed_at).total_seconds()
+    if delta <= 0:
+        return None
+    return delta
+
+
+async def _first_observed_at_for_markets(
+    ch: AsyncClient, condition_ids: list[str], asked_at: datetime
+) -> dict[str, datetime]:
+    """First (earliest) ``observed_at`` per ``condition_id`` for the EOL ramp.
+
+    PRD §6.8 calls for a "last 5% of life" convergence ramp. The denominator
+    is the total observed life of the market: ``end_date - MIN(observed_at)``.
+    """
+    if not condition_ids:
+        return {}
+    query = """
+        SELECT condition_id, min(observed_at) AS first_observed_at
+        FROM markets_snapshots
+        WHERE condition_id IN {ids:Array(String)}
+          AND observed_at <= {asof:DateTime64(3)}
+        GROUP BY condition_id
+    """
+    result = await ch.query(
+        query,
+        parameters={"ids": list(condition_ids), "asof": asked_at},
+    )
+    out: dict[str, datetime] = {}
+    for row in result.result_rows:
+        out[str(row[0])] = row[1]
+    return out
+
+
+def _apply_eol_convergence_adjustment(
+    *,
+    model_prob: float | None,
+    market_mid: float | None,
+    time_to_resolution_s: float | None,
+    total_life_s: float | None,
+    reasons: list[str],
+) -> tuple[float | None, float | None, bool]:
+    """Apply the M8.3 / PRD §6.8 end-of-life convergence ramp.
+
+    Returns ``(converged_prob, weight, phantom_suppressed)``:
+      * ``converged_prob`` — model_prob blended toward market_mid by ``weight``.
+      * ``weight`` — the ramp weight in [0, 1]; None when inputs are missing.
+      * ``phantom_suppressed`` — True iff we're inside the final hour and the
+        caller should drop the displayed edge to None.
+
+    Mutates ``reasons`` to append a human-readable note when the ramp engages
+    so the served ``model_reasons`` panel explains the displayed convergence.
+    """
+    weight = eol_q.final_life_market_mid_weight(time_to_resolution_s, total_life_s)
+    converged = eol_q.apply_eol_convergence(model_prob, market_mid, weight)
+    phantom_suppressed = eol_q.should_suppress_phantom_edge(time_to_resolution_s)
+    if weight is not None and weight > 0.0:
+        reasons.append(
+            f"end-of-life convergence: market-price weight={weight:.2f}"
+        )
+    if phantom_suppressed:
+        reasons.append("edge suppressed: final-hour phantom-edge gate")
+    return converged, weight, phantom_suppressed
+
+
 def _edge_bps(model_prob: float | None, market_mid: float | None) -> float | None:
     if model_prob is None or market_mid is None:
         return None
@@ -1019,6 +1112,14 @@ async def list_markets(
         condition_ids=[str(snap["condition_id"]) for snap in snaps],
         asked_at=asked_at,
     )
+    # M8.3 EOL convergence (PRD §6.8): one batched MIN(observed_at) query
+    # per request gives us total_life per market, which feeds the final-5%
+    # convergence ramp.
+    first_observed_at_by_cid = await _first_observed_at_for_markets(
+        ch,
+        condition_ids=[str(snap["condition_id"]) for snap in snaps],
+        asked_at=asked_at,
+    )
 
     discrete = _discrete_config_from_settings(settings)
     registry = load_ensemble_registry(settings.ensemble_registry_file)
@@ -1115,6 +1216,22 @@ async def list_markets(
                 concentration_threshold=settings.holder_concentration_down_weight_threshold,
             )
             model_prob = tuning.tuned_probability
+            list_ttr = _time_to_resolution_s(
+                snap.get("end_date"),  # type: ignore[arg-type]
+                asked_at,
+            )
+            list_total_life_s = _total_life_s(
+                snap.get("end_date"),  # type: ignore[arg-type]
+                first_observed_at_by_cid.get(cid),
+            )
+            list_eol_reasons: list[str] = []
+            model_prob, eol_weight, eol_phantom = _apply_eol_convergence_adjustment(
+                model_prob=model_prob,
+                market_mid=yes_mid,
+                time_to_resolution_s=list_ttr,
+                total_life_s=list_total_life_s,
+                reasons=list_eol_reasons,
+            )
             rows.append(
                 MarketListRow(
                     condition_id=cid,
@@ -1132,18 +1249,19 @@ async def list_markets(
                     model_source=model_source,
                     refinement_source=refinement_source,
                     baseline_source=str(result.displayed_source.value),
-                    edge_bps=_edge_bps_with_resolution_risk(
-                        model_prob=model_prob,
-                        market_mid=yes_mid,
-                        resolution_risk=risk_row,
-                        suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
+                    edge_bps=(
+                        None
+                        if eol_phantom
+                        else _edge_bps_with_resolution_risk(
+                            model_prob=model_prob,
+                            market_mid=yes_mid,
+                            resolution_risk=risk_row,
+                            suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
+                        )
                     ),
                     needs_review=classification.needs_review,
                     confidence=classification.confidence,
-                    time_to_resolution_s=_time_to_resolution_s(
-                        snap.get("end_date"),  # type: ignore[arg-type]
-                        asked_at,
-                    ),
+                    time_to_resolution_s=list_ttr,
                     smart_money_consensus=(
                         sm_row.consensus_score if sm_row is not None else None
                     ),
@@ -1177,6 +1295,8 @@ async def list_markets(
                     thin_book=(
                         adversarial_row.thin_book if adversarial_row is not None else False
                     ),
+                    eol_convergence_weight=eol_weight,
+                    eol_phantom_suppressed=eol_phantom,
                 )
             )
     return rows
@@ -1244,6 +1364,11 @@ class MarketModelDetail:
     model_disabled_reason: str | None
     model_disabled_consecutive_days: int | None
     model_disabled_observed_at: datetime | None
+    # M8.3 EOL convergence (PRD §6.8): non-zero weight in the final 5% of a
+    # market's life; ``eol_phantom_suppressed`` is True in the final hour and
+    # forces ``edge_bps`` to None to suppress phantom last-hour alerts.
+    eol_convergence_weight: float | None = None
+    eol_phantom_suppressed: bool = False
     # Internal: PIT-built EnsembleSample for this market at ``asked_at``.
     # Excluded from the JSON payload (the retrain pipeline reads it directly).
     ensemble_sample: EnsembleSample | None = None
@@ -1595,6 +1720,24 @@ async def model_for_market(
     )
     model_prob = tuning.tuned_probability
     model_reasons.extend(tuning.reasons)
+    # M8.3 / PRD §6.8 — apply the end-of-life convergence ramp before edge.
+    # MIN(observed_at) for the single market is one tiny query; total_life_s
+    # falls back to None when the snapshot history is missing or end_date is
+    # absent, in which case the ramp simply doesn't engage.
+    first_observed_map = await _first_observed_at_for_markets(
+        ch, [condition_id], asked_at
+    )
+    detail_total_life_s = _total_life_s(
+        snap.get("end_date"),  # type: ignore[arg-type]
+        first_observed_map.get(condition_id),
+    )
+    model_prob, eol_weight, eol_phantom = _apply_eol_convergence_adjustment(
+        model_prob=model_prob,
+        market_mid=yes_mid,
+        time_to_resolution_s=time_to_resolution_s,
+        total_life_s=detail_total_life_s,
+        reasons=model_reasons,
+    )
     ensemble_sample = _ensemble_sample_for_row(
         classification=classification,
         pipeline_result=pipeline_result,
@@ -1617,12 +1760,15 @@ async def model_for_market(
         model_source=model_source,
         sample=ensemble_sample,
     )
-    edge_bps = _edge_bps_with_resolution_risk(
-        model_prob=model_prob,
-        market_mid=yes_mid,
-        resolution_risk=resolution_risk_row,
-        suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
-    )
+    if eol_phantom:
+        edge_bps = None
+    else:
+        edge_bps = _edge_bps_with_resolution_risk(
+            model_prob=model_prob,
+            market_mid=yes_mid,
+            resolution_risk=resolution_risk_row,
+            suppress_threshold=settings.resolution_risk_edge_suppress_threshold,
+        )
     if edge_bps is None:
         kelly_side, kelly_fraction, kelly_uncapped_fraction = (None, None, None)
     else:
@@ -1653,9 +1799,9 @@ async def model_for_market(
         model_reasons.append("Adversarial-flow risk elevated; ensemble refinement down-weighted")
     if adversarial_flow_row.thin_book:
         model_reasons.append("thin_book: top-of-book depth below threshold")
-    if edge_bps is None:
+    if edge_bps is None and not eol_phantom:
         model_reasons.append("edge suppressed: high resolution risk")
-        
+
     distribution_samples = None
     if classification.market_type in (MarketType.RANGE, MarketType.MULTI_OUTCOME):
         from . import distribution_utils as dist_utils
@@ -1756,6 +1902,8 @@ async def model_for_market(
         model_disabled_observed_at=(
             disable_status.observed_at if disable_status is not None else None
         ),
+        eol_convergence_weight=eol_weight,
+        eol_phantom_suppressed=eol_phantom,
         ensemble_sample=ensemble_sample,
     )
 

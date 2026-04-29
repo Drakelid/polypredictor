@@ -18,6 +18,12 @@ class IngestSettings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    postgres_host: str = "localhost"
+    postgres_port: int = 5432
+    postgres_db: str = "polypredictor"
+    postgres_user: str = "polypredictor"
+    postgres_password: str = "polypredictor_dev"
+
     clickhouse_host: str = "localhost"
     clickhouse_port: int = 8123
     clickhouse_db: str = "polypredictor"
@@ -30,6 +36,7 @@ class IngestSettings(BaseSettings):
     polymarket_clob_base: str = "https://clob.polymarket.com"
     polymarket_data_base: str = "https://data-api.polymarket.com"
     polymarket_wss_base: str = "wss://ws-subscriptions-clob.polymarket.com"
+    user_secret_encryption_key_b64: str | None = None
     deribit_base: str = "https://www.deribit.com/api/v2"
     binance_base: str = "https://fapi.binance.com"
     coinbase_intx_base: str = "https://api.international.coinbase.com"
@@ -148,6 +155,13 @@ class IngestSettings(BaseSettings):
     holders_poll_batch_size: int = 20
     holders_poll_max_markets: int = 200
     holder_concentration_whale_threshold: float = 0.40  # single-wallet > 40% flags
+
+    @property
+    def postgres_dsn(self) -> str:
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
 
 
 @lru_cache(maxsize=1)

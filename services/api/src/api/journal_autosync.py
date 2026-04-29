@@ -44,7 +44,13 @@ class UserJournalAutoSyncService:
         self._manager: UserWssManager | None = None
 
     async def refresh(self) -> None:
-        auth = await load_user_auth(pool=self._pool, settings=self._settings)
+        # The autosync service is a system-level, single-instance listener;
+        # it always operates on the demo user's CLOB credentials by design.
+        auth = await load_user_auth(
+            pool=self._pool,
+            email=self._settings.journal_demo_user_email,
+            settings=self._settings,
+        )
         if auth is None:
             await self.stop()
             return
@@ -69,6 +75,7 @@ class UserJournalAutoSyncService:
         await journal_q.create_auto_fill_call(
             pool=self._pool,
             ch=self._ch,
+            email=self._settings.journal_demo_user_email,
             settings=self._settings,
             payload=journal_q.AutoJournalFillInput(
                 condition_id=fill.condition_id,
