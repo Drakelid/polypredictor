@@ -60,7 +60,7 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     ports:
-      - "8000:8000"
+      - "8000"
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-polypredictor}
@@ -87,7 +87,7 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     ports:
-      - "3000:3000"
+      - "3000"
     environment:
       API_BASE: http://api:8000
       NEXT_PUBLIC_API_BASE: http://localhost:8000
